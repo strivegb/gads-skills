@@ -1,0 +1,5 @@
+Campaign report
+August 5, 2026 - September 3, 2026
+Campaign,Campaign type,Bid strategy type,Bid strategy,Target CPA,Target ROAS,Cost,Clicks,Impr.,Conversions,Conv. value,Avg. CPC,Search impr. share,Search abs. top IS,Search lost IS (budget),Search lost IS (rank)
+Brand - Acme,Search,Maximize conversions,,--,--,840.00,400,"2,050",121,0,2.10,92.00%,80.00%,0.00%,8.00%
+Total: Account,,,,,,,,,,,,,,,

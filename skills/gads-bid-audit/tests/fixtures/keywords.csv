@@ -1,0 +1,8 @@
+Search keyword report
+October 4, 2026 - November 2, 2026
+Keyword,Match type,Campaign,Ad group,Cost,Clicks,Conversions
+acme,Exact match,Brand - Acme,Brand,"1,200.00",250,80
+acme payroll,Phrase match,Brand - Acme,Brand,672.00,140,38
+acme payroll,Exact match,Search - Payroll Software,Core,"2,210.00",700,60
+payroll software,Phrase match,Search - Payroll Software,Core,"6,630.00","1,450",70
+hr software,Phrase match,Search - HR Software,HR,"3,660.00","1,020",60

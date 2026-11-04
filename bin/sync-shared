@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Copy shared/gads.py and shared/SHARED_RUNTIME.md into every skill.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+for d in skills/gads-*/; do
+  cp shared/gads.py "$d/scripts/gads.py"
+  cp shared/SHARED_RUNTIME.md "$d/SHARED_RUNTIME.md"
+done
+echo "synced shared runtime into $(ls -d skills/gads-*/ | wc -l | tr -d ' ') skills"

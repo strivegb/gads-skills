@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+gads-out/
+.DS_Store
+*.log.jsonl

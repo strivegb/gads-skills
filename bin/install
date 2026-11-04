@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Install (copy) every skill into ~/.claude/skills. Re-run after pulling changes.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+bin/sync-shared
+DEST="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
+mkdir -p "$DEST"
+for d in skills/gads-*/; do
+  n=$(basename "$d")
+  rsync -a --delete --exclude __pycache__ --exclude gads-out "$d" "$DEST/$n/"
+  echo "installed $n -> $DEST/$n"
+done

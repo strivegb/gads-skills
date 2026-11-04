@@ -1,0 +1,8 @@
+Conversion actions
+All time
+Conversion action,Conversion source,Category,Action optimization,Count,Click-through conv. window,Attribution model,Value,Status
+Purchase (Google Ads tag),Website,Purchase,Primary action,Every,30 days,Data-driven,Use different values,Recording conversions
+GA4 purchase,Google Analytics 4 (web),Purchase,Primary action,Every,30 days,Data-driven,Use different values,Recording conversions
+Lead form submit,Website,Submit lead form,Primary action,Every,30 days,Last click,Use the same value: 50,No recent conversions
+Page view - pricing,Website,Page view,Primary action,One,30 days,Data-driven,Don't use a value,Recording conversions
+Add to cart,Website,Add to cart,Secondary action,Every,30 days,Data-driven,Don't use a value,Recording conversions
