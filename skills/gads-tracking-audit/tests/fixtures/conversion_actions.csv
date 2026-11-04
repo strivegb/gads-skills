@@ -6,3 +6,4 @@ GA4 purchase,Google Analytics 4 (web),Purchase,Primary action,Every,30 days,Data
 Lead form submit,Website,Submit lead form,Primary action,Every,30 days,Last click,Use the same value: 50,No recent conversions
 Page view - pricing,Website,Page view,Primary action,One,30 days,Data-driven,Don't use a value,Recording conversions
 Add to cart,Website,Add to cart,Secondary action,Every,30 days,Data-driven,Don't use a value,Recording conversions
+Demo booked (calendar),Website,Book appointment,Primary action,One,30 days,Data-driven,Use the same value: 200,Recording conversions

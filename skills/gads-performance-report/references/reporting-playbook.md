@@ -51,9 +51,31 @@ Avoid comparing windows with a different weekday mix (Mon-Thu vs Fri-Sun) for B2
 ## Conversion lag
 
 - Most lead forms report within a day; purchases and offline imports (CRM, calls) can lag 7-30 days.
-- The script flags lag when the period ends within 3 days of today, or when the last 3 days convert 25%+ below the rest of the period.
+- Lag days: live, the 90% point of `metrics.conversions` by `segments.conversion_lag_bucket` over 90 days (capped at 14); offline `--lag-days`, default 3. Days younger than the lag are "still collecting conversions".
+- When the current period includes such days, the report adds a complete-days-only line: the same number of days dropped from the end of both periods, so weekdays stay aligned. Without a Day column it says the comparison is provisional.
+- The script also flags lag when the last lag days convert 25%+ below the rest of the period.
 - When flagged, compare spend and clicks confidently and conversions cautiously. Re-run once the lag window has passed before calling a trend.
 - Accounts importing offline conversions: compare periods that are at least the conversion window old.
+
+## Same-weekday baseline
+
+- Weekday mix drives most day-to-day movement, so a Monday is compared only with earlier Mondays. Default history is 8 weeks; at least 4 are needed.
+- z = (value - mean) / standard deviation of those weeks. The deviation has a floor (5% of the mean, and the square root of the mean for clicks and conversions) so a very steady history does not turn small moves into alerts.
+- Flags need |z| >= 2 and a change of 20% or more. CPA uses cost over conversions per window and skips weeks with zero conversions.
+- Conversions, CPA and value anchor on the last day outside the lag window. Spend and clicks use the last full day.
+- Holidays and promotions break the weekday pattern. Ask before treating a holiday week as an anomaly.
+
+## Stopped serving
+
+- An enabled campaign with budget that had impressions in the previous 14 days and none on the last full day. Live mode reads status, primary status reasons, budget and end date; offline needs Campaign status and Budget columns, else it asks the user to confirm the campaign is enabled.
+- Usual causes, in order: ads or assets disapproved, ad groups or keywords paused, billing or payment hold, an end date passed, a targeting or bid change that removed eligibility. Check change history first.
+
+## Change history
+
+- Live: `change_event` with a `change_event.change_date_time` filter inside the last 30 days and `LIMIT` 10000 or less. Fields used: change_date_time, change_resource_type, change_resource_name, resource_change_operation, client_type, changed_fields, campaign, old_resource, new_resource. Budget changes map to every campaign sharing that budget.
+- Offline: Tools > Change history > download. Rows are matched to movers by campaign name and date.
+- Attached text reads "target CPA lowered from $60 to $45 on Oct 28 by a user in the Google Ads UI". Bid, budget and status changes are listed first, up to 3 per mover.
+- Emails and names stay out of the report. Set `"show_change_users": true` in the profile only when the reader should see them.
 
 ## Materiality and noise
 

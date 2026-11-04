@@ -68,6 +68,13 @@ While an action is silent, Smart Bidding sees fewer conversions and can lower bi
 
 ## Data freshness
 
-- Conversion delay: many conversions arrive days after the click. Treat the last 3 days as incomplete.
+- Conversion delay: conversions are reported on the click date, so recent days keep filling in. The lag is account and action specific: web leads often land within a day, purchases with long consideration and offline imports take a week or more.
+- How the audit measures it (live): `segments.conversion_lag_bucket` (days from click to conversion) with `metrics.all_conversions`, per action, over 90 days. The lag is the upper edge of the bucket where the running share reaches 90%. Under 20 conversions in 90 days keeps the default of 3 days. Skipped days are capped at 14 (`--max-lag`) so the check stays timely; within that, expected counts are also scaled by the completion curve.
+- Offline: no lag data in UI exports, so the default is 3 days. Set `--lag-days` from the Conversions > action > "Days to conversion" segment if you know it.
+
+## Silent vs quiet
+
+- The silent check asks how likely zero is at the action's usual rate: P(0 in N days) = exp(-rate x N). At 0.4 a day over 7 days that is about 6%, which happens; at 4 a day it is under 0.01%, which does not. Only results below 1% (`--silent-p`) are flagged.
+- An action reported as "not flagged" may still be broken. If it matters (a low-volume qualified lead, say), check it by hand in Tag Assistant after a test conversion.
 - Modeled conversions (consent mode) are added with a delay.
 - Offline imports arrive on the import schedule; a "silent" offline action may just be a missed upload.

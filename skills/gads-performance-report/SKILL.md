@@ -40,14 +40,16 @@ No API access? Offline mode takes UI exports from Campaigns with columns Campaig
    python3 "$S/build_report.py" --csv campaigns_by_day.csv --currency USD          # offline
    ```
    `--goal cpa|roas` overrides the auto choice (ROAS when a ROAS target is set or value is a real share of spend). `--top 5` writes up more movers.
+   Offline extras: `--changes change_history.csv` (Change history export: Date & time, User, Campaign, Ad group, Changes) annotates movers; `--today YYYY-MM-DD` if the export is older than yesterday. The same-weekday and zero-impression checks need a Day-segmented export covering 9 weeks (`--days 63` when exporting); add Campaign status and Budget columns so paused or unfunded campaigns are skipped.
 
 3. **Read the movers before presenting.** The script finds and decomposes them; you check the story holds:
    - A conversion-rate collapse with steady clicks is usually tracking or a landing page, not demand. Cross-check with `gads-tracking-audit` before advising bid changes.
    - Budget-lost impression share rising alongside good efficiency is a budget problem (`gads-budget-pacing`). Rank-lost rising is bids or ad quality (`gads-bid-audit`, `gads-rsa-audit`).
-   - If the change log explains a move (new campaign, target change, paused ad group), say so. Pull it with `gads.query` on `change_event` when the user asks why.
+   - Changes that hit a mover's campaign in the comparison window are attached to its explanation (live: `change_event`, last 30 days only). Say whether the change plausibly explains the move. The report names the tool ("a user in the Google Ads UI", "auto-applied recommendations"); user emails appear only when the profile sets `"show_change_users": true`.
+   - A zero-impression alert is critical: an enabled campaign with budget stopped serving. Lead with it.
    - Seasonality, promotions and launches are the user's context. Ask if a move looks calendar driven.
 
-4. **Present** in this shape, no more than 10 lines: one headline sentence, the 3 movers with their action verb, the queue count, one caveat if conversion lag applies. Link `report.html` for the full page. Publish it as an Artifact if the user wants to share it with a client or team.
+4. **Present** in this shape, no more than 10 lines: any stopped-serving alert first, one headline sentence, the 3 movers with their action verb, same-weekday anomalies, the queue count, one caveat if conversion lag applies. Link `report.html` for the full page. Publish it as an Artifact if the user wants to share it with a client or team.
 
 ## How movers are chosen
 
@@ -72,7 +74,15 @@ Action rules (judged against the profile target, or last period ±15%):
 | Falling on conversion rate | Start: check landing page and tracking |
 | More spend, no more results | Stop: mine search terms, hold budget |
 
-Approvals from this skill are "investigate" items only (conversion-rate collapse on a mover, account-wide drop with no single cause). The report never proposes account changes itself; the other gads-* skills do.
+## Alerts
+
+| Check | Rule | Severity |
+|---|---|---|
+| Stopped serving | enabled campaign with budget, zero impressions on the last full day (`--zero-days`), impressions in the 14 days before | critical |
+| Same-weekday anomaly | last complete day and last 7 days vs the same weekdays over the previous 8 weeks (`--anomaly-weeks`) for spend, clicks, conversions, CPA, value; flag at \|z\| >= 2 (`--anomaly-z`) and a change of 20%+ (`--anomaly-min-change`); counts also need 20 clicks or 3 conversions of absolute change | high at \|z\| >= 3, else medium; favourable moves go in the report only |
+| Conversion lag | conversion metrics leave out the lag window (live: 90% point of `segments.conversion_lag_bucket`, capped at 14; offline `--lag-days`, default 3). The KPI table is followed by a complete-days-only comparison | note |
+
+Approvals from this skill are "investigate" items only (stopped serving, anomalies, conversion-rate collapse on a mover, account-wide drop with no single cause). The report never proposes account changes itself; the other gads-* skills do.
 
 Metric definitions, comparison windows, conversion lag and how to write the narrative: `references/reporting-playbook.md`.
 
@@ -85,11 +95,14 @@ Metric definitions, comparison windows, conversion lag and how to write the narr
 | `campaigns.csv` | campaign metrics for both periods plus decomposition columns |
 | `gads-performance-report.json` | summary and investigate items, merged into `approvals.md` |
 
+Tests: `bash tests/run.sh` (offline fixtures, fixed dates).
+
 ## Rules
 
 - Read-only. This skill never changes the account.
 - Rank by contribution, never by % change. A campaign going from 1 to 3 conversions is +200% and irrelevant.
-- Say when the current period is still collecting delayed conversions. Do not call a drop on the last 1-3 days a trend.
+- Say when the current period is still collecting delayed conversions. Do not call a drop inside the lag window a trend.
+- Never print a user's email or name from change history unless the profile allows it.
 - Optimization score is Google's recommendation adoption score. Report it, never present it as performance.
 - Every insight ends with start, stop, continue or double down, tied to the goal. No insight without an action.
 - Plain language. No em dashes. Never invent benchmarks; compare to the account's own history and targets.

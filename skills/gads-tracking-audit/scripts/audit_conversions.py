@@ -9,6 +9,12 @@ the Conversions column, static purchase values, non data-driven
 attribution, enhanced conversions off, and removed/hidden actions that
 still record.
 
+Conversion lag: recent days are still filling in. Live mode estimates, per
+action, the days by which ~90% of conversions have arrived (from
+segments.conversion_lag_bucket over 90 days). Offline uses --lag-days
+(default 3). The silent and drop checks skip those days, and the silent
+check only fires when P(0 conversions | historic rate) < --silent-p.
+
 Live:     $PY audit_conversions.py -c 123-456-7890 --days 56
 Offline:  python3 audit_conversions.py --csv conversion_actions.csv --daily conversions_by_action_day.csv
 
@@ -35,6 +41,7 @@ import gads  # noqa: E402
 from gads import Approval, money, num  # noqa: E402
 
 SKILL = "gads-tracking-audit"
+DEFAULT_LAG = 3  # days; used offline and when an action has too little lag data
 
 # Categories that measure intent, not business outcomes. Primary = inflation.
 MICRO = {"PAGE_VIEW", "ENGAGEMENT", "ADD_TO_CART", "BEGIN_CHECKOUT", "OUTBOUND_CLICK", "GET_DIRECTIONS", "DEFAULT"}
@@ -124,6 +131,66 @@ def load_live(cid: str, start: str, end: str) -> tuple[list[dict], dict, dict, l
     return actions, daily, setting, goals
 
 
+# Upper edge (days) of each conversion lag bucket. A conversion in a bucket
+# has arrived by the time the click is that many days old.
+LAG_BUCKET_DAYS = {
+    "LESS_THAN_ONE_DAY": 1, "ONE_TO_TWO_DAYS": 2, "TWO_TO_THREE_DAYS": 3, "THREE_TO_FOUR_DAYS": 4,
+    "FOUR_TO_FIVE_DAYS": 5, "FIVE_TO_SIX_DAYS": 6, "SIX_TO_SEVEN_DAYS": 7, "SEVEN_TO_EIGHT_DAYS": 8,
+    "EIGHT_TO_NINE_DAYS": 9, "NINE_TO_TEN_DAYS": 10, "TEN_TO_ELEVEN_DAYS": 11, "ELEVEN_TO_TWELVE_DAYS": 12,
+    "TWELVE_TO_THIRTEEN_DAYS": 13, "THIRTEEN_TO_FOURTEEN_DAYS": 14, "FOURTEEN_TO_TWENTY_ONE_DAYS": 21,
+    "TWENTY_ONE_TO_THIRTY_DAYS": 30, "THIRTY_TO_FORTY_FIVE_DAYS": 45, "FORTY_FIVE_TO_SIXTY_DAYS": 60,
+    "SIXTY_TO_NINETY_DAYS": 90,
+}
+
+
+def lag_from_buckets(buckets: dict[str, float], share: float = 0.9) -> tuple[int, dict[int, float]] | None:
+    """(days by which `share` of conversions arrived, completion curve {age_days: share arrived})."""
+    tot = sum(v for k, v in buckets.items() if k in LAG_BUCKET_DAYS)
+    if tot <= 0:
+        return None
+    curve, cum, lag = {}, 0.0, None
+    for name, days in sorted(LAG_BUCKET_DAYS.items(), key=lambda kv: kv[1]):
+        cum += buckets.get(name, 0.0) / tot
+        curve[days] = min(1.0, cum)
+        if lag is None and cum >= share - 1e-9:
+            lag = days
+    return lag or 90, curve
+
+
+def load_lag_live(cid: str, end: str, min_conv: float = 20) -> dict[str, dict]:
+    """Per-action conversion lag from 90 days of segments.conversion_lag_bucket.
+
+    Uses all_conversions so secondary actions get a lag too. Actions with
+    fewer than `min_conv` conversions keep the default. Optional: an API
+    error leaves every action on the default.
+    """
+    e = dt.date.fromisoformat(end)
+    s = (e - dt.timedelta(days=89)).isoformat()
+    rows = gads.query(cid, f"""
+        SELECT segments.conversion_action_name, segments.conversion_lag_bucket, metrics.all_conversions
+        FROM customer WHERE {gads.gaql_dates(s, end)}""", soft=True)
+    acc = defaultdict(lambda: defaultdict(float))
+    for r in rows:
+        acc[r.get("segments.conversion_action_name", "")][r.get("segments.conversion_lag_bucket", "")] += num(r.get("metrics.all_conversions"))
+    out = {}
+    for name, b in acc.items():
+        if sum(b.values()) < min_conv:
+            continue
+        res = lag_from_buckets(b)
+        if res:
+            out[name] = {"days": res[0], "curve": res[1], "source": "estimated from 90 days of lag buckets",
+                         "conversions": round(sum(b.values()), 1)}
+    return out
+
+
+def completion(curve: dict[int, float] | None, age: int) -> float:
+    """Share of a day's conversions already reported when the click day is `age` days old."""
+    if not curve:
+        return 1.0
+    got = [v for d, v in curve.items() if d <= age]
+    return max(got) if got else 0.0
+
+
 def load_csv(paths: list[str], daily_path: str | None) -> tuple[list[dict], dict, dict, list[dict]]:
     actions = []
     for p in paths:
@@ -200,6 +267,10 @@ def name_sim(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, " ".join(strip(a).split()), " ".join(strip(b).split())).ratio()
 
 
+def fmt_p(p: float) -> str:
+    return "under 0.01%" if p < 0.0001 else f"{p:.2%}"
+
+
 def poisson_cdf(k: int, lam: float) -> float:
     if lam <= 0:
         return 1.0
@@ -214,7 +285,11 @@ def analyse(actions, daily, setting, goals, start, end, args, currency):
     d0, d1 = dt.date.fromisoformat(start), dt.date.fromisoformat(end)
     days = [(d0 + dt.timedelta(i)).isoformat() for i in range((d1 - d0).days + 1)]
     by_name = {a["name"]: a for a in actions}
+    lags = getattr(args, "_lags", {}) or {}
     for a in actions:
+        a["lag"] = lags.get(a["name"]) or {"days": args.lag_days if args.lag_days is not None else DEFAULT_LAG,
+                                           "curve": None,
+                                           "source": "set by --lag-days" if args.lag_days is not None else f"default {DEFAULT_LAG} days, no lag data; override with --lag-days"}
         s = series(daily.get(a["name"], {}), days)
         a["all_conv_window"] = sum(s)
         a["conv_window"] = sum(series(daily.get(a["name"], {}), days, 0))
@@ -280,27 +355,49 @@ def analyse(actions, daily, setting, goals, start, end, args, currency):
                 a["name"], {"category": a["category"], "counting": a["counting"]}, conf="high", risk="low",
                 change={"id": a["id"], "set": {"counting_type": "ONE_PER_CLICK"}})
 
-    # 3. silent or sharply dropped actions
+    # 3. silent or sharply dropped actions. Skip each action's lag window
+    #    (days still filling in), then ask how likely zero is at its rate.
     recent_n = args.recent_days
+    today_d = dt.date.fromisoformat(args.today) if args.today else d1 + dt.timedelta(days=1)
     for a in counted:
-        s = series(daily.get(a["name"], {}), days)
+        lag = a["lag"]
+        L = min(lag["days"], args.max_lag)
+        # days whose click date is younger than the lag are incomplete
+        n_incomplete = sum(1 for d in days if (today_d - dt.date.fromisoformat(d)).days <= L)
+        s_all = series(daily.get(a["name"], {}), days)
+        s = s_all[:len(s_all) - n_incomplete] if n_incomplete else s_all
+        days_c = days[:len(s)]
         if len(s) < recent_n + 14:
             continue
-        base, recent = s[-(recent_n + 28):-recent_n] or s[:-recent_n], s[-recent_n:]
+        base, recent = s[-(recent_n + 28):-recent_n], s[-recent_n:]
+        recent_days = days_c[-recent_n:]
         base_mean = sum(base) / len(base) if base else 0
-        expected = base_mean * recent_n
+        # expected count, scaled by how complete each recent day already is
+        curve = lag.get("curve")
+        expected = sum(base_mean * completion(curve, (today_d - dt.date.fromisoformat(d)).days) for d in recent_days) if curve else base_mean * recent_n
         got = sum(recent)
         active_days = sum(1 for x in base if x > 0)
-        if base_mean >= 0.3 and got == 0 and active_days >= len(base) * 0.4:
-            last = next((days[-recent_n - 1 - i] for i, x in enumerate(reversed(base)) if x > 0), "?")
-            add("silent_action", "high", f"Investigate '{a['name']}': zero conversions in the last {recent_n} days",
-                f"It averaged {base_mean:.1f}/day over the prior {len(base)} days and recorded nothing since {last}. Expected ~{expected:.0f}. A broken tag or form change is the usual cause; smart bidding is now optimizing toward nothing.",
-                a["name"], {"baseline_per_day": round(base_mean, 2), "recent": got, "expected": round(expected, 1), "last_conversion_day": last},
+        p_zero = math.exp(-expected)
+        lag_txt = f"the last {n_incomplete} day(s) are left out as still filling in (lag {lag['days']} days, {lag['source']})" if n_incomplete else "no recent days needed to be left out for lag"
+        window = f"{recent_days[0]} to {recent_days[-1]}"
+        if got == 0 and p_zero < args.silent_p and active_days >= len(base) * 0.4:
+            last = next((days_c[-recent_n - 1 - i] for i, x in enumerate(reversed(base)) if x > 0), "?")
+            add("silent_action", "high", f"Investigate '{a['name']}': zero conversions in the last {recent_n} complete days",
+                f"It averaged {base_mean:.1f}/day over the prior {len(base)} days and recorded nothing from {window} (last conversion {last}). "
+                f"Expected ~{expected:.0f}; the chance of zero at that rate is {fmt_p(p_zero)}. {lag_txt[0].upper() + lag_txt[1:]}. "
+                "A broken tag or form change is the usual cause; smart bidding is now optimizing toward nothing.",
+                a["name"], {"baseline_per_day": round(base_mean, 2), "recent": got, "expected": round(expected, 1),
+                            "p_zero": round(p_zero, 6), "window": window, "lag_days": lag["days"], "lag_source": lag["source"],
+                            "excluded_days": n_incomplete, "last_conversion_day": last},
                 conf="high", risk="low")
-        elif expected >= 10 and got < 0.4 * expected and poisson_cdf(int(got), expected) < 0.01:
+        elif got == 0 and base_mean > 0 and p_zero >= args.silent_p:
+            a["_quiet"] = {"expected": expected, "p_zero": p_zero, "window": window}
+        elif expected >= 10 and got < 0.4 * expected and poisson_cdf(int(got), expected) < args.silent_p:
             add("conversion_drop", "medium", f"Check '{a['name']}': down {1 - got / expected:.0%} vs its 4-week run rate",
-                f"{got:.0f} conversions in the last {recent_n} days vs ~{expected:.0f} expected. That is unlikely to be noise (p<0.01). Check the tag, the form, and site changes before touching bids.",
-                a["name"], {"baseline_per_day": round(base_mean, 2), "recent": got, "expected": round(expected, 1)},
+                f"{got:.0f} conversions from {window} vs ~{expected:.0f} expected. That is unlikely to be noise (p<{args.silent_p:g}). "
+                f"{lag_txt[0].upper() + lag_txt[1:]}. Check the tag, the form, and site changes before touching bids.",
+                a["name"], {"baseline_per_day": round(base_mean, 2), "recent": got, "expected": round(expected, 1),
+                            "window": window, "lag_days": lag["days"], "excluded_days": n_incomplete},
                 conf="medium", risk="low")
 
     # 4. micro-conversions counted as primary
@@ -402,6 +499,12 @@ def build_outputs(res, cid, currency, setting):
           f"- Counted conversions in window: {res['total_conv']:.0f}"]
     if setting.get("known"):
         md.append(f"- Enhanced conversions for leads: {'on' if setting.get('ec_leads') else 'off'} · customer data terms: {'accepted' if setting.get('accepted_terms') else 'not accepted'} · account tracking status: {setting.get('status', '')}")
+    lag_src = sorted({a["lag"]["source"] for a in res["counted"]})
+    md.append(f"- Conversion lag: silent and drop checks skip each action's lag window ({'; '.join(lag_src)}). Lag per action is in the table below.")
+    quiet = [a for a in res["counted"] if a.get("_quiet")]
+    for a in quiet:
+        q = a["_quiet"]
+        md.append(f"- Not flagged: '{a['name']}' had zero conversions from {q['window']}, but at its usual rate the chance of that is {q['p_zero']:.0%}, so it is within normal variation.")
     md += ["", "## Findings", ""]
     order = {"high": 0, "medium": 1, "low": 2}
     for it in sorted(res["issues"], key=lambda x: order[x["severity"]]):
@@ -411,16 +514,19 @@ def build_outputs(res, cid, currency, setting):
     md += ["", "## Conversion actions", "",
            gads.md_table([[a["name"], a["category"], a["type"], "yes" if (a["included"] or a["primary"]) else "no",
                            a["counting"].replace("_PER_CLICK", "").lower(), a["attribution"].replace("GOOGLE_SEARCH_ATTRIBUTION_", "").replace("GOOGLE_ADS_", "").lower(),
-                           f"{a['all_conv_window']:.0f}", a["status"].lower()] for a in sorted(res["actions"], key=lambda x: -x["all_conv_window"])],
-                         ["Action", "Category", "Source", "Counted", "Count", "Attribution", "All conv", "Status"]), "",
+                           f"{a['all_conv_window']:.0f}", f"{a['lag']['days']}", a["status"].lower()] for a in sorted(res["actions"], key=lambda x: -x["all_conv_window"])],
+                         ["Action", "Category", "Source", "Counted", "Count", "Attribution", "All conv", "Lag (days)", "Status"]), "",
            "## What this audit cannot see", "",
            "- Whether a tag fires on the real thank-you page. Run `check_site_tags.py` on that URL, or walk through Tag Assistant.",
            "- Offline/CRM imports quality beyond counts. Compare imported qualified leads to CRM totals by week.",
-           "- Consent mode impact. Modeled conversions appear with a delay of a few days; do not read the last 3 days as final."]
-    rows = [{k: (v if not isinstance(v, (list, dict)) else json.dumps(v)) for k, v in a.items() if not k.startswith("_")} for a in res["actions"]]
+           "- Consent mode impact. Modeled conversions appear with a delay of a few days; do not read the lag window as final."]
+    rows = [{**{k: (v if not isinstance(v, (list, dict)) else json.dumps(v)) for k, v in a.items() if not k.startswith("_") and k != "lag"},
+             "lag_days": a["lag"]["days"], "lag_source": a["lag"]["source"]} for a in res["actions"]]
     summary = {"headline": headline, "score": res["score"], "actions": len(res["actions"]), "counted": len(res["counted"]),
                "issues_high": cnt["high"], "issues_medium": cnt["medium"], "issues_low": cnt["low"],
-               "expected_tags": res["expected"], "total_conv": round(res["total_conv"], 1)}
+               "expected_tags": res["expected"], "total_conv": round(res["total_conv"], 1),
+               "lag_days": {a["name"]: a["lag"]["days"] for a in res["actions"]},
+               "not_flagged_low_volume": [a["name"] for a in res["counted"] if a.get("_quiet")]}
     extra = {"conversion_actions.csv": gads.to_csv(rows), "expected_tags.json": json.dumps(res["expected"], indent=2)}
     return res["findings"], summary, "\n".join(md) + "\n", extra
 
@@ -435,6 +541,10 @@ def main():
     ap = gads.common_args(argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter))
     ap.add_argument("--daily", help="Offline: report with Day, Conversion action, Conversions, All conv. columns.")
     ap.add_argument("--recent-days", type=int, default=7, help="Window for silent/drop checks (default 7).")
+    ap.add_argument("--lag-days", type=int, help=f"Conversion lag in days for every action. Live default: estimated per action; offline default {DEFAULT_LAG}.")
+    ap.add_argument("--max-lag", type=int, default=14, help="Never skip more than this many recent days for lag (default 14).")
+    ap.add_argument("--silent-p", type=float, default=0.01, help="Flag silent/drop only when the chance of the result at the usual rate is below this (default 0.01).")
+    ap.add_argument("--today", help="Treat this date (YYYY-MM-DD) as today for lag. Offline default: the day after the last day in --daily.")
     ap.set_defaults(days=56)
     args = ap.parse_args()
     start, end = gads.resolve_window(args)
@@ -453,6 +563,10 @@ def main():
         cid = gads.clean_cid(args.customer)
         currency = gads.account_info(cid)["currency"]
         actions, daily, setting, goals = load_live(cid, start, end)
+        if args.lag_days is None:
+            args._lags = load_lag_live(cid, end)
+        if not args.today:
+            args.today = gads.today().isoformat()
     if not actions:
         gads.die("No conversion actions found.")
     res = analyse(actions, daily, setting, goals, start, end, args, currency)

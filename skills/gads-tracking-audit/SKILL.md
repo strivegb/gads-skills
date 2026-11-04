@@ -37,6 +37,7 @@ No API access? Offline mode with two UI exports:
    python3 "$S/audit_conversions.py" --csv conversion_actions.csv --daily conv_by_action_day.csv --currency USD
    ```
    56 days gives a 4-week baseline before the 7-day silent/drop check. Use `--recent-days 3` for high-volume accounts during an incident.
+   Conversion lag: live mode estimates it per action (days until ~90% of conversions arrive, from `segments.conversion_lag_bucket` over 90 days; actions under 20 conversions keep the default). Offline uses `--lag-days` (default 3). The silent and drop checks skip those days and the report shows the lag per action. Offline, "today" is the day after the last day in `--daily`; pass `--today YYYY-MM-DD` if the export is older.
 
 2. **Check the site.**
    ```bash
@@ -58,7 +59,7 @@ No API access? Offline mode with two UI exports:
    - A "silent" action right after a site release is almost always a broken tag or a changed form. Ask what shipped on the last conversion date.
    - Do not recommend bid or budget changes from other gads-* skills while a high-severity tracking issue is open. Say that explicitly in the summary.
 
-5. **Present** in 6-10 lines: health score, the duplicate or silent finding first (with its count), what share of reported conversions is suspect, site tag status, and what was confirmed vs only inferred. Point to `approvals.md`.
+5. **Present** in 6-10 lines: health score, the duplicate or silent finding first (with its count), what share of reported conversions is suspect, site tag status, the lag used, and what was confirmed vs only inferred. Point to `approvals.md`.
 
 6. **On approval**, changes are made by the user in Google Ads (Goals > Conversions > the action > Edit settings) or in GTM. Give exact click paths. This skill does not mutate conversion settings via API: a wrong primary/secondary switch changes what every Smart Bidding campaign optimizes toward, and that deserves a human click.
 
@@ -67,8 +68,8 @@ No API access? Offline mode with two UI exports:
 | Check | Rule | Severity |
 |---|---|---|
 | Duplicate conversion | two counted actions, same category; score from daily correlation (r >= 0.8), count ratio (>= 0.7), name similarity, mixed source (tag vs GA4 import) | high |
-| Silent primary | averaged >= 0.3/day over the prior 28 days, active on 40%+ of days, zero in the last 7 | high |
-| Sharp drop | last 7 days < 40% of expected and Poisson p < 0.01 | medium |
+| Silent primary | zero in the last 7 complete days (lag window skipped), chance of zero at the 28-day rate exp(-rate x 7) below 1% (`--silent-p`), active on 40%+ of baseline days | high |
+| Sharp drop | last 7 complete days < 40% of expected and Poisson p below `--silent-p` | medium |
 | Micro-conversion primary | page view, engagement, add to cart, begin checkout, outbound click, default category counted in Conversions | high if >= 20% of conversions |
 | Counting type | purchase counted One; lead counted Every | medium |
 | Static value | purchase action always uses the default value | medium |
@@ -92,10 +93,12 @@ Deeper rules, category cheat sheet, GA4 vs Ads tag guidance and consent mode not
 | `gads-tracking-tags.md` / `site_tags.json` | site tag findings per URL |
 | `approvals.md` | merged queue across all gads-* skills |
 
+Tests: `bash tests/run.sh` (offline fixtures, fixed dates).
+
 ## Rules
 
 - Read-only. No API writes from this skill.
 - Say what was confirmed (render hits, Tag Assistant) and what was inferred (correlation, static HTML). Never claim a tag fires from static HTML alone.
-- The last 3 days of conversions are incomplete (conversion delay, modeled conversions). The silent check uses a 7-day window for this reason.
+- Recent days are incomplete (conversion delay, modeled conversions). Silent and drop checks run on complete days only, and a low-volume action with zero conversions is reported as "not flagged" when zero is a normal outcome at its rate.
 - Fetch pages with the script's generic user agent. Never send the user's email or credentials to a site.
 - Plain language in the summary. No em dashes.
