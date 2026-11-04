@@ -54,5 +54,10 @@ python3 gads.py rebuild-queue --dir gads-out/1234567890/2026-11-03
 ## Safety
 
 - Every skill is read-only by default.
-- Apply scripts validate with `validate_only=True` unless `--execute` is passed, and Claude passes `--execute` only after the user approves those specific items in the conversation.
-- Editing `gads.py`: change it in one skill, then copy it to all six so they stay identical (`RUNTIME_VERSION` must match).
+- Writes go through `apply_*.py` in three steps:
+  1. **Validate** (no `--execute`): the API checks every operation with `validate_only=True`. On success it prints a token, a hash of the plan file.
+  2. **Execute**: `--execute --confirm <token>`, only after the user approves those specific items in the conversation. The script refuses if the plan file changed since validation (removing rejected rows means validating again).
+  3. **Read back**: after writing, the script re-reads the account, reports any change that did not land, and appends every write to `gads-out/<cid>/changes.log.jsonl`.
+- Budget and bid target changes above 20% need `--allow-large --reason "<why>"`, and the reason is logged.
+- Anything new that can serve (ads, keywords) is created paused or exported as paused for Editor.
+- The source of truth is the `gads-skills` repo. Edit `shared/gads.py` there, then run `bin/sync-shared` (and `bin/install`) so every skill gets the identical copy. `RUNTIME_VERSION` must match.

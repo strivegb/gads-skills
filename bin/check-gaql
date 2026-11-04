@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Check that every resource.field referenced in the skills' GAQL exists in the
+# installed google-ads library (API v25). Checks field existence only, not
+# whether fields can be selected together.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+PY="${PY:-$HOME/Library/Application Support/pipx/venvs/google-ads-mcp/bin/python}"
+files=("$@"); [ ${#files[@]} -eq 0 ] && files=(skills/gads-*/scripts/*.py)
+grep -ohE '\b(customer|campaign|ad_group|ad_group_ad|ad_group_criterion|campaign_criterion|campaign_budget|bidding_strategy|conversion_action|search_term_view|campaign_search_term_view|campaign_search_term_insight|asset|ad_group_ad_asset_view|change_event|campaign_simulation|ad_group_simulation|metrics|segments|keyword_view|shared_set|shared_criterion|campaign_shared_set|landing_page_view|expanded_landing_page_view|ad_group_asset|campaign_asset|customer_conversion_goal|conversion_goal_campaign_config)\.[a-z0-9_]+(\.[a-z0-9_]+)*' "${files[@]}" \
+  | sort -u | "$PY" -c '
+import sys
+from google.ads.googleads.v25.services.types.google_ads_service import GoogleAdsRow
+d = GoogleAdsRow.meta.pb.DESCRIPTOR
+bad = 0
+for line in sys.stdin:
+    p = line.strip(); desc = d; ok = True
+    for part in p.split("."):
+        if desc is None: ok = False; break
+        f = desc.fields_by_name.get(part) or desc.fields_by_name.get(part + "_")
+        if f is None: ok = False; break
+        desc = f.message_type
+    if not ok: print("MISSING", p); bad += 1
+print(f"checked GAQL fields: {bad} missing")
+sys.exit(1 if bad else 0)
+'

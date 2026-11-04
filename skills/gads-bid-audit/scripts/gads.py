@@ -44,7 +44,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-RUNTIME_VERSION = "1.0.0"
+RUNTIME_VERSION = "1.1.0"
 ADWORDS_SCOPE = "https://www.googleapis.com/auth/adwords"
 
 # --------------------------------------------------------------------------
@@ -480,6 +480,89 @@ def rebuild_queue(d: Path) -> Path:
     p.write_text("\n".join(lines) + "\n")
     return p
 
+
+
+# --------------------------------------------------------------------------
+# Write safety (used by every apply_*.py)
+#
+#   1. Validate run (no --execute): the API checks every operation with
+#      validate_only=True. On success record_validation() stores a token
+#      (hash of the plan file) next to the plan and prints it.
+#   2. Execute run: --execute --confirm <token>. check_execute() refuses
+#      unless the token matches the plan file as it is now AND a successful
+#      validation of that exact file exists. Editing the file (for example
+#      removing rejected rows) changes the token, so it must be re-validated.
+#   3. After writing, the apply script reads the account back and compares
+#      (verify_readback) and every write is appended to changes.log.jsonl.
+# --------------------------------------------------------------------------
+
+
+def plan_token(path: str | Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]
+
+
+def _validation_path(path: str | Path) -> Path:
+    p = Path(path)
+    return p.with_name(p.name + ".validated.json")
+
+
+def add_write_args(ap):
+    ap.add_argument("--execute", action="store_true", help="Actually write. Without it, validate only.")
+    ap.add_argument("--confirm", default="", help="Token printed by the validate run. Required with --execute.")
+    return ap
+
+
+def check_execute(args, plan_path: str | Path) -> bool:
+    """Return validate_only. Dies if --execute is not backed by a matching validation."""
+    if not getattr(args, "execute", False):
+        return True
+    tok = plan_token(plan_path)
+    vp = _validation_path(plan_path)
+    rec = json.loads(vp.read_text()) if vp.exists() else {}
+    if rec.get("token") != tok:
+        die(f"Refusing to write: {Path(plan_path).name} has not been validated in its current form.\n"
+            "Run the same command without --execute first, then pass the token it prints.")
+    if args.confirm != tok:
+        die(f"Refusing to write: --confirm must be the token from the validate run ({tok}).")
+    return False
+
+
+def record_validation(plan_path: str | Path, n_ops: int, extra: dict | None = None) -> str:
+    tok = plan_token(plan_path)
+    rec = {"token": tok, "validated_at": dt.datetime.now().isoformat(timespec="seconds"), "operations": n_ops}
+    rec.update(extra or {})
+    _validation_path(plan_path).write_text(json.dumps(rec, indent=2))
+    print(f"Validation passed for {n_ops} operation(s). Nothing was changed.")
+    print(f"To write after the user approves: add --execute --confirm {tok}")
+    return tok
+
+
+def log_change(cid: str, skill: str, record: dict) -> Path:
+    """Append one write to <GADS_OUT>/<cid>/changes.log.jsonl (audit trail)."""
+    root = Path(os.environ.get("GADS_OUT", "gads-out")) / (clean_cid(cid) or "offline")
+    root.mkdir(parents=True, exist_ok=True)
+    p = root / "changes.log.jsonl"
+    rec = {"at": dt.datetime.now().isoformat(timespec="seconds"), "skill": skill, **record}
+    with p.open("a") as f:
+        f.write(json.dumps(rec, default=str) + "\n")
+    return p
+
+
+def verify_readback(expected: dict, actual: dict, tol: float = 0.01) -> list[str]:
+    """Compare what we meant to write with what the account now holds.
+
+    expected/actual map a key (resource name, keyword text...) to a value.
+    Returns human-readable mismatches; empty list means every write landed.
+    """
+    bad = []
+    for k, want in expected.items():
+        got = actual.get(k)
+        if isinstance(want, (int, float)) and isinstance(got, (int, float)):
+            if abs(got - want) > max(tol * abs(want), 0.005):
+                bad.append(f"{k}: expected {want}, account has {got}")
+        elif got != want:
+            bad.append(f"{k}: expected {want!r}, account has {got!r}")
+    return bad
 
 # --------------------------------------------------------------------------
 # CLI helpers

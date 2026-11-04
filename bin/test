@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Run every skill's offline tests and check the shared runtime is in sync.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+fail=0
+for d in skills/gads-*/; do
+  if ! cmp -s shared/gads.py "$d/scripts/gads.py"; then
+    echo "FAIL $(basename $d): scripts/gads.py differs from shared/gads.py (run bin/sync-shared)"; fail=1
+  fi
+done
+for t in skills/gads-*/tests/run.sh; do
+  n=$(basename "$(dirname "$(dirname "$t")")")
+  out=$(GADS_OUT="$(mktemp -d)" GADS_PROFILE_DIR="$(mktemp -d)" bash "$t" 2>&1); rc=$?
+  if [ $rc -eq 0 ]; then echo "PASS $n"; else echo "FAIL $n"; echo "$out" | tail -20 | sed 's/^/    /'; fail=1; fi
+done
+exit $fail
