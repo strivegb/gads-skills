@@ -1,0 +1,60 @@
+Campaign report
+November 1, 2026 - November 19, 2026
+Day,Campaign,Campaign type,Budget,Budget name,Cost,Conversions,Conv. value,Search impr. share,Search lost IS (budget),Search lost IS (rank),Bid strategy type
+2026-11-01,Search - Demo Requests,Search,200.00,,330.00,4.71,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-01,Search - Payroll,Search,300.00,,292.00,5.96,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-01,Search - Brand,Search,100.00,,96.00,6.40,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-02,Search - Demo Requests,Search,200.00,,231.00,3.30,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-02,Search - Payroll,Search,300.00,,294.00,6.00,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-02,Search - Brand,Search,100.00,,97.00,6.47,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-03,Search - Demo Requests,Search,200.00,,234.00,3.34,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-03,Search - Payroll,Search,300.00,,296.00,6.04,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-03,Search - Brand,Search,100.00,,98.00,6.53,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-04,Search - Demo Requests,Search,200.00,,342.00,4.89,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-04,Search - Payroll,Search,300.00,,298.00,6.08,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-04,Search - Brand,Search,100.00,,96.00,6.40,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-05,Search - Demo Requests,Search,200.00,,228.00,3.26,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-05,Search - Payroll,Search,300.00,,300.00,6.12,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-05,Search - Brand,Search,100.00,,97.00,6.47,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-06,Search - Demo Requests,Search,200.00,,231.00,3.30,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-06,Search - Payroll,Search,300.00,,292.00,5.96,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-06,Search - Brand,Search,100.00,,98.00,6.53,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-07,Search - Demo Requests,Search,200.00,,330.00,4.71,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-07,Search - Payroll,Search,300.00,,294.00,6.00,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-07,Search - Brand,Search,100.00,,96.00,6.40,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-08,Search - Demo Requests,Search,200.00,,237.00,3.39,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-08,Search - Payroll,Search,300.00,,296.00,6.04,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-08,Search - Brand,Search,100.00,,97.00,6.47,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-09,Search - Demo Requests,Search,200.00,,228.00,3.26,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-09,Search - Payroll,Search,300.00,,298.00,6.08,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-09,Search - Brand,Search,100.00,,98.00,6.53,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-10,Search - Demo Requests,Search,200.00,,342.00,4.89,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-10,Search - Payroll,Search,300.00,,300.00,6.12,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-10,Search - Brand,Search,100.00,,96.00,6.40,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-11,Search - Demo Requests,Search,200.00,,234.00,3.34,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-11,Search - Payroll,Search,300.00,,292.00,5.96,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-11,Search - Brand,Search,100.00,,97.00,6.47,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-12,Search - Demo Requests,Search,200.00,,237.00,3.39,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-12,Search - Payroll,Search,300.00,,294.00,6.00,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-12,Search - Brand,Search,100.00,,98.00,6.53,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-13,Search - Demo Requests,Search,200.00,,330.00,4.71,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-13,Search - Payroll,Search,300.00,,296.00,6.04,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-13,Search - Brand,Search,100.00,,96.00,6.40,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-14,Search - Demo Requests,Search,200.00,,231.00,3.30,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-14,Search - Payroll,Search,300.00,,298.00,6.08,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-14,Search - Brand,Search,100.00,,97.00,6.47,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-15,Search - Demo Requests,Search,200.00,,234.00,3.34,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-15,Search - Payroll,Search,300.00,,300.00,6.12,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-15,Search - Brand,Search,100.00,,98.00,6.53,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-16,Search - Demo Requests,Search,200.00,,342.00,4.89,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-16,Search - Payroll,Search,300.00,,292.00,5.96,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-16,Search - Brand,Search,100.00,,96.00,6.40,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-17,Search - Demo Requests,Search,200.00,,228.00,3.26,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-17,Search - Payroll,Search,300.00,,294.00,6.00,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-17,Search - Brand,Search,100.00,,97.00,6.47,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-18,Search - Demo Requests,Search,200.00,,231.00,3.30,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-18,Search - Payroll,Search,300.00,,296.00,6.04,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-18,Search - Brand,Search,100.00,,98.00,6.53,0,92%,1.0%,7.0%,Maximize conversions
+2026-11-19,Search - Demo Requests,Search,200.00,,330.00,4.71,0,48%,12.0%,40.0%,Maximize conversions
+2026-11-19,Search - Payroll,Search,300.00,,298.00,6.08,0,52%,15.0%,33.0%,Maximize conversions
+2026-11-19,Search - Brand,Search,100.00,,96.00,6.40,0,92%,1.0%,7.0%,Maximize conversions

@@ -4,7 +4,12 @@ audit_bids.py - bid strategy audit: targets vs actuals, brand overbidding, learn
 
 Live:     $PY audit_bids.py -c 123-456-7890 [--days 30]
 Offline:  python3 audit_bids.py --csv campaigns_30d.csv [--recent campaigns_7d.csv]
-              [--prior campaigns_prior.csv] [--keywords keywords.csv] --currency USD
+              [--prior campaigns_prior.csv] [--keywords keywords.csv]
+              [--network campaigns_by_network.csv] --currency USD
+
+--network: Campaigns report segmented by "Network (with search partners)"
+(Campaign, Network (with search partners), Cost, Clicks, Conversions, Conv. value).
+Without it the Search Partners check is skipped offline.
 
 Outputs (gads-out/<cid>/<date>/):
   gads-bid-audit.json / .md    summary + approval items
@@ -37,6 +42,10 @@ TIGHT = 0.80           # target this far below actual CPA = constrained
 BRAND_IS_HIGH = 0.85   # brand search IS at or above this = already dominant
 BRAND_CPC_DRIFT = 1.25 # brand CPC up 25%+ vs baseline = overbid signal
 CHANGE_QUIET_DAYS = 14
+PARTNER_MIN_CLICKS = 100   # partners need this many clicks in the window to judge
+PARTNER_MIN_SHARE = 0.05   # and at least this share of the campaign's spend
+PARTNER_CPA_WORSE = 1.5    # partners CPA this many times Google Search CPA = materially worse
+PARTNER_ROAS_WORSE = 0.67  # partners ROAS below this share of Google Search ROAS = materially worse
 
 CPA_TYPES = {"TARGET_CPA", "MAXIMIZE_CONVERSIONS"}
 ROAS_TYPES = {"TARGET_ROAS", "MAXIMIZE_CONVERSION_VALUE"}
@@ -193,20 +202,80 @@ def changes_live(cid: str) -> dict[str, list[str]]:
     return out
 
 
+SIM_FIELDS = {"TARGET_CPA": ("target_cpa_point_list", "target_cpa_micros", True),
+              "TARGET_ROAS": ("target_roas_point_list", "target_roas", False)}
+
+
 def simulations_live(cid: str) -> dict[str, dict]:
+    """Bid simulator points per campaign id: {cid: {"TARGET_CPA": {"points", "start", "end"}}}.
+
+    Soft: an error or an account without simulations just means no preview.
+    """
     out: dict[str, dict] = {}
-    for kind, field in (("TARGET_CPA", "target_cpa_point_list"), ("TARGET_ROAS", "target_roas_point_list")):
-        try:
-            rows = gads.query(cid, f"""
-                SELECT campaign_simulation.campaign_id, campaign_simulation.type,
-                       campaign_simulation.{field}.points
-                FROM campaign_simulation
-                WHERE campaign_simulation.type = '{kind}'""")
-        except SystemExit:
-            continue
+    for kind, (field, _, _) in SIM_FIELDS.items():
+        rows = gads.query(cid, f"""
+            SELECT campaign_simulation.campaign_id, campaign_simulation.type,
+                   campaign_simulation.start_date, campaign_simulation.end_date,
+                   campaign_simulation.{field}.points
+            FROM campaign_simulation
+            WHERE campaign_simulation.type = '{kind}'""", soft=True)
         for r in rows:
             pts = r.get(f"campaign_simulation.{field}.points") or []
-            out.setdefault(str(r.get("campaign_simulation.campaign_id")), {})[kind] = pts
+            out.setdefault(str(r.get("campaign_simulation.campaign_id")), {})[kind] = {
+                "points": pts, "start": r.get("campaign_simulation.start_date", ""), "end": r.get("campaign_simulation.end_date", "")}
+    return out
+
+
+def network_live(cid: str, start: str, end: str) -> dict[str, dict]:
+    rows = gads.query(cid, f"""
+        SELECT campaign.id, campaign.name, campaign.network_settings.target_search_network,
+               segments.ad_network_type, metrics.cost_micros, metrics.clicks,
+               metrics.conversions, metrics.conversions_value
+        FROM campaign
+        WHERE {gads.gaql_dates(start, end)} AND campaign.status != 'REMOVED'
+          AND campaign.advertising_channel_type = 'SEARCH'
+          AND segments.ad_network_type IN ('SEARCH', 'SEARCH_PARTNERS')""", soft=True)
+    out: dict[str, dict] = {}
+    for r in rows:
+        net = "partners" if r.get("segments.ad_network_type") == "SEARCH_PARTNERS" else "search"
+        n = out.setdefault(r.get("campaign.name", ""), new_net(str(r.get("campaign.id", ""))))
+        n["partners_on"] = bool(r.get("campaign.network_settings.target_search_network"))
+        add_net(n[net], micros(r.get("metrics.cost_micros")), num(r.get("metrics.clicks")),
+                num(r.get("metrics.conversions")), num(r.get("metrics.conversions_value")))
+    return out
+
+
+def new_net(campaign_id: str = "") -> dict:
+    z = lambda: {"cost": 0.0, "clicks": 0.0, "conv": 0.0, "value": 0.0}  # noqa: E731
+    return {"campaign_id": campaign_id, "partners_on": None, "search": z(), "partners": z()}
+
+
+def add_net(a: dict, cost: float, clicks: float, conv: float, value: float) -> None:
+    a["cost"] += cost
+    a["clicks"] += clicks
+    a["conv"] += conv
+    a["value"] += value
+
+
+def network_csv(path: str) -> dict[str, dict]:
+    """Campaigns report segmented by 'Network (with search partners)'."""
+    out: dict[str, dict] = {}
+    for r in gads.read_ui_csv(path):
+        name = gads.pick(r, "campaign")
+        netv = str(gads.pick(r, "network_with_search_partners", "network", "ad_network_type")).lower()
+        if not name or not netv:
+            continue
+        if "partner" in netv:
+            net = "partners"
+        elif netv in ("google search", "search", "google_search") or netv.startswith("google search"):
+            net = "search"
+        else:
+            continue  # display, youtube, cross-network
+        n = out.setdefault(name, new_net(gads.pick(r, "campaign_id")))
+        add_net(n[net], num(gads.pick(r, "cost")), num(gads.pick(r, "clicks")),
+                num(gads.pick(r, "conversions", "conv")), num(gads.pick(r, "conv_value", "conversion_value")))
+    for n in out.values():
+        n["partners_on"] = n["partners"]["clicks"] > 0 or n["partners"]["cost"] > 0
     return out
 
 
@@ -267,16 +336,111 @@ def by_name(d: dict[str, dict]) -> dict[str, dict]:
 # ---------------------------------------------------------------- analysis
 
 
-def closest_point(points: list[dict], key: str, want: float, scale_micros: bool) -> dict | None:
-    best, gap = None, None
+def sim_at(points: list[dict], key: str, scale_micros: bool, want: float) -> dict | None:
+    """Simulator cost/conversions/value at a target, interpolated between points.
+
+    Outside the simulated range it returns the nearest point and marks it.
+    """
+    pts = []
     for p in points:
         v = micros(p.get(key)) if scale_micros else num(p.get(key))
-        if not v:
+        if v:
+            pts.append((v, micros(p.get("cost_micros")), num(p.get("biddable_conversions")), num(p.get("biddable_conversions_value"))))
+    if not pts or not want:
+        return None
+    pts.sort()
+    if want <= pts[0][0] or want >= pts[-1][0]:
+        t, c, cv, val = pts[0] if want <= pts[0][0] else pts[-1]
+        exact = abs(t - want) <= 0.02 * want
+        return {"target": t, "cost": c, "conv": cv, "value": val, "nearest": not exact}
+    for (t0, c0, v0, x0), (t1, c1, v1, x1) in zip(pts, pts[1:]):
+        if t0 <= want <= t1:
+            f = (want - t0) / (t1 - t0) if t1 > t0 else 0.0
+            return {"target": want, "cost": c0 + (c1 - c0) * f, "conv": v0 + (v1 - v0) * f,
+                    "value": x0 + (x1 - x0) * f, "nearest": False}
+    return None
+
+
+def sim_preview(sim: dict | None, kind: str, current: float, proposed: float) -> dict | None:
+    """Simulator at the current and the proposed target. None when there is nothing usable."""
+    if not sim or not sim.get("points"):
+        return None
+    _, key, scale = SIM_FIELDS[kind]
+    at_new = sim_at(sim["points"], key, scale, proposed)
+    if not at_new:
+        return None
+    at_cur = sim_at(sim["points"], key, scale, current) if current else None
+    if at_new["nearest"] and (at_cur is None or at_cur["target"] == at_new["target"]):
+        return None  # the simulator does not reach the proposed target, so it says nothing useful
+    return {"current": at_cur, "proposed": at_new, "start": sim.get("start", ""), "end": sim.get("end", "")}
+
+
+def sim_text(pv: dict, kind: str, cur: str) -> str:
+    def f(label, x):
+        t = money(x["target"], cur) if kind == "TARGET_CPA" else f"{x['target']:.0%}"
+        out = f"{label} ({t}{', nearest simulated point' if x['nearest'] else ''}): {money(x['cost'], cur)} cost, {x['conv']:.0f} conversions"
+        return out + (f" worth {money(x['value'], cur)}" if kind == "TARGET_ROAS" and x["value"] else "")
+    period = f" ({pv['start']} to {pv['end']})" if pv.get("start") else ""
+    parts = ([f("current", pv["current"])] if pv["current"] else []) + [f("proposed", pv["proposed"])]
+    return f" Google's simulator estimates{period}: " + "; ".join(parts) + "."
+
+
+def sim_evidence(pv: dict | None) -> dict:
+    if not pv:
+        return {}
+    r = lambda x: None if not x else {k: (round(v, 2) if isinstance(v, float) else v) for k, v in x.items()}  # noqa: E731
+    return {"simulator": {"period": f"{pv['start']}..{pv['end']}", "current": r(pv["current"]), "proposed": r(pv["proposed"])}}
+
+
+def partners_check(net: dict[str, dict], camps: dict[str, dict], cur: str, days: int) -> list[Approval]:
+    """Search Partners vs Google Search, per Search campaign."""
+    scale = 30.0 / days
+    by = by_name(camps)
+    out = []
+    for name, n in sorted(net.items()):
+        s, p = n["search"], n["partners"]
+        if n["partners_on"] is False or p["clicks"] < PARTNER_MIN_CLICKS:
             continue
-        g = abs(v - want)
-        if gap is None or g < gap:
-            best, gap = p, g
-    return best
+        total = s["cost"] + p["cost"]
+        if not total or p["cost"] < PARTNER_MIN_SHARE * total:
+            continue
+        c = by.get(name, {})
+        value_mode = c.get("strategy") in ROAS_TYPES or (s["value"] > 0 and not c)
+        if value_mode and s["value"] and s["cost"]:
+            s_roas, p_roas = s["value"] / s["cost"], p["value"] / p["cost"]
+            if p_roas > s_roas * PARTNER_ROAS_WORSE:
+                continue
+            excess = p["cost"] - p["value"] / s_roas
+            gap = f"ROAS {p_roas:.0%} on {p['clicks']:.0f} clicks vs {s_roas:.0%} on Google Search"
+            ev = {"search_roas": round(s_roas, 3), "partners_roas": round(p_roas, 3)}
+        elif s["conv"]:
+            s_cpa = s["cost"] / s["conv"]
+            p_cpa = p["cost"] / p["conv"] if p["conv"] else None
+            if p_cpa is not None and p_cpa < s_cpa * PARTNER_CPA_WORSE:
+                continue
+            if p_cpa is None and p["cost"] < 2 * s_cpa:
+                continue
+            excess = p["cost"] - p["conv"] * s_cpa
+            gap = (f"CPA {money(p_cpa, cur)} on {p['clicks']:.0f} clicks vs {money(s_cpa, cur)} on Google Search ({p_cpa / s_cpa:.1f}x)"
+                   if p_cpa else f"{money(p['cost'], cur)} and {p['clicks']:.0f} clicks with no conversions, vs {money(s_cpa, cur)} CPA on Google Search")
+            ev = {"search_cpa": round(s_cpa, 2), "partners_cpa": round(p_cpa, 2) if p_cpa else None}
+        else:
+            continue
+        if excess <= 0:
+            continue
+        out.append(Approval(
+            skill=SKILL, kind="search_partners_off", entity=name,
+            action=f"Turn off Search Partners on '{name}'",
+            why=(f"Over {days} days Search Partners ran {gap}. Partners took {p['cost'] / total:.0%} of spend for "
+                 f"{(p['conv'] / (s['conv'] + p['conv'])) if (s['conv'] + p['conv']) else 0:.0%} of conversions. "
+                 f"Turning it off saves about {money(excess * scale, cur)}/month over what those conversions would cost on Google Search, "
+                 f"and gives up about {p['conv'] * scale:.0f} conversions/month that Google Search may partly recover. Change it in Settings > Networks."),
+            impact_monthly=excess * scale, impact_label="saves", confidence="high" if p["clicks"] >= 3 * PARTNER_MIN_CLICKS else "medium",
+            risk="low", severity="medium",
+            evidence={"days": days, "search": {k: round(v, 2) for k, v in s.items()}, "partners": {k: round(v, 2) for k, v in p.items()}, **ev},
+            change={"campaign_id": n.get("campaign_id") or c.get("campaign_id"), "field": "campaign.network_settings.target_search_network",
+                    "value": False}))
+    return out
 
 
 def analyse(camps, recent, prior, kws, portfolios, changes, sims, prof, cur, days):
@@ -446,10 +610,9 @@ def analyse(camps, recent, prior, kws, portfolios, changes, sims, prof, cur, day
                        "jumping straight to the business target usually chokes volume.")
             if new:
                 new = round(new, 2)
-                sim = closest_point(sims.get(str(c.get("campaign_id")), {}).get("TARGET_CPA", []), "target_cpa_micros", new, True)
-                if sim:
-                    why += (f" Google's simulator at ~{money(micros(sim.get('target_cpa_micros')), cur)}: "
-                            f"{num(sim.get('biddable_conversions')):.0f} conv for {money(micros(sim.get('cost_micros')), cur)} per simulation period.")
+                pv = sim_preview(sims.get(str(c.get("campaign_id")), {}).get("TARGET_CPA"), "TARGET_CPA", tgt or 0, new)
+                if pv:
+                    why += sim_text(pv, "TARGET_CPA", cur)
                 if c["cpa_7d"] and c["cpa_7d"] > act * 1.3:
                     why += f" Last 7 days CPA is {money(c['cpa_7d'], cur)}, worse than the 30-day figure; watch before tightening further."
                 if hold:
@@ -467,7 +630,7 @@ def analyse(camps, recent, prior, kws, portfolios, changes, sims, prof, cur, day
                     change={"campaign_id": c.get("campaign_id"), "metric": "target_cpa", "proposed": new},
                     evidence={"target_cpa": round(tgt or 0, 2), "cpa_30d": round(act, 2), "cpa_7d": round(c["cpa_7d"] or 0, 2),
                               "conv_30d": round(c["conv"] * scale, 1), "lost_is_rank": c["lost_rank"],
-                              "lost_is_budget": c["lost_budget"], "portfolio": c.get("portfolio_name", "")}))
+                              "lost_is_budget": c["lost_budget"], "portfolio": c.get("portfolio_name", ""), **sim_evidence(pv)}))
                 if not c.get("portfolio_name") and c.get("campaign_id"):
                     changes_rows.append({"campaign_id": c["campaign_id"], "campaign": name, "strategy": st, "metric": "target_cpa",
                                          "current": round(tgt or 0, 2), "proposed": new, "held": "yes" if hold else "no"})
@@ -501,10 +664,9 @@ def analyse(camps, recent, prior, kws, portfolios, changes, sims, prof, cur, day
                 why = f"Actual ROAS {act:.0%} is under the business target {biz_roas:.0%}. Step the bid target to {new:.0%} (max {STEP:.0%})."
             if new:
                 new = round(new, 2)
-                sim = closest_point(sims.get(str(c.get("campaign_id")), {}).get("TARGET_ROAS", []), "target_roas", new, False)
-                if sim:
-                    why += (f" Google's simulator at ~{num(sim.get('target_roas')):.0%}: value {money(num(sim.get('biddable_conversions_value')), cur)} "
-                            f"for {money(micros(sim.get('cost_micros')), cur)}.")
+                pv = sim_preview(sims.get(str(c.get("campaign_id")), {}).get("TARGET_ROAS"), "TARGET_ROAS", tgt or 0, new)
+                if pv:
+                    why += sim_text(pv, "TARGET_ROAS", cur)
                 if hold:
                     why += f" Hold until quiet: {hold}."
                 approvals.append(Approval(
@@ -513,7 +675,7 @@ def analyse(camps, recent, prior, kws, portfolios, changes, sims, prof, cur, day
                     why=why, impact_label="gains", confidence="low" if conv_m < MIN_CONV_TROAS else "medium",
                     risk="high" if hold else "medium",
                     evidence={"target_roas": tgt, "roas_30d": round(act, 3), "roas_7d": round(c["roas_7d"] or 0, 3),
-                              "conv_30d": round(conv_m, 1), "lost_is_rank": c["lost_rank"]}))
+                              "conv_30d": round(conv_m, 1), "lost_is_rank": c["lost_rank"], **sim_evidence(pv)}))
                 if not c.get("portfolio_name") and c.get("campaign_id"):
                     changes_rows.append({"campaign_id": c["campaign_id"], "campaign": name, "strategy": st, "metric": "target_roas",
                                          "current": tgt, "proposed": new, "held": "yes" if hold else "no"})
@@ -544,6 +706,7 @@ def main():
     ap.add_argument("--recent", help="Offline: campaign report for the last 7 days.")
     ap.add_argument("--prior", help="Offline: campaign report for a baseline period (e.g. 61-90 days ago) for brand CPC drift.")
     ap.add_argument("--keywords", help="Offline: keyword report (Keyword, Campaign, Cost, Clicks, Conversions) for brand detection.")
+    ap.add_argument("--network", help="Offline: campaign report segmented by Network (with search partners) for the Search Partners check.")
     ap.add_argument("--brand", help="Comma-separated brand terms (adds to the profile).")
     ap.add_argument("--target-cpa", type=float, help="Business target CPA (overrides profile).")
     ap.add_argument("--target-roas", type=float, help="Business target ROAS as a ratio, e.g. 4 for 400%% (overrides profile).")
@@ -561,6 +724,7 @@ def main():
         recent = camp_csv(args.recent) if args.recent else {}
         prior = camp_csv(args.prior) if args.prior else {}
         kws = kw_csv(args.keywords) if args.keywords else []
+        net = network_csv(args.network) if args.network else None
         portfolios, changes, sims = {}, {}, {}
     else:
         if not args.customer:
@@ -577,6 +741,7 @@ def main():
         portfolios = portfolio_targets_live(cid)
         changes = changes_live(cid)
         sims = simulations_live(cid)
+        net = network_live(cid, start, end)
     if not camps:
         gads.die("No campaigns with data in the window.")
 
@@ -591,14 +756,19 @@ def main():
         print("warning: no brand_terms in profile or --brand; brand campaigns are detected by name only.", file=sys.stderr)
 
     approvals, change_rows, notes, table, overspend = analyse(camps, recent, prior, kws, portfolios, changes, sims, prof, cur, days)
+    partner_items = partners_check(net, camps, cur, days) if net is not None else []
+    approvals += partner_items
 
     n_target = sum(1 for a in approvals if a.kind in ("loosen_target", "tighten_target"))
+    n_partners = len(partner_items)
     tc = [a for a in approvals if a.kind == "tighten_target" and "target CPA" in a.action]
     headline_bits = []
     if overspend:
         headline_bits.append(f"~{money(overspend, cur)} of brand overbidding in {days}d")
     if tc:
         headline_bits.append(f"{money(tc[0].change.get('proposed'), cur)} target CPA suggested for '{tc[0].entity}'")
+    if n_partners:
+        headline_bits.append(f"Search Partners underperforming on {n_partners} campaign(s)")
     headline_bits.append(f"{n_target} target change(s), {len(approvals)} items")
     headline = "; ".join(headline_bits)
 
@@ -611,6 +781,19 @@ def main():
         ["Campaign", "Brand", "Strategy", "Target", "Cost", "Conv", "CPA", "IS", "Lost rank", "Lost budget", "State"]), ""]
     if approvals:
         md += ["## Recommendations", ""] + [f"- **{a.action}.** {a.why}" for a in approvals] + [""]
+    md += ["## Search Partners", ""]
+    if net is None:
+        md += ["Search Partners check skipped: pass --network with a Campaigns report segmented by Network (with search partners).", ""]
+    elif partner_items:
+        md += [gads.md_table([[a.entity, money(a.evidence["partners"]["cost"], cur), int(a.evidence["partners"]["clicks"]),
+                               a.evidence["partners"]["conv"], money(a.evidence.get("search_cpa"), cur) if a.evidence.get("search_cpa") else f"{a.evidence.get('search_roas', 0):.0%}",
+                               (money(a.evidence["partners_cpa"], cur) if a.evidence.get("partners_cpa") else "no conv") if "search_cpa" in a.evidence
+                               else f"{a.evidence.get('partners_roas', 0):.0%}", money(a.impact_monthly, cur) + "/mo"] for a in partner_items],
+                             ["Campaign", "Partners cost", "Clicks", "Conv", "Google Search CPA/ROAS", "Partners CPA/ROAS", "Saves"]), ""]
+    else:
+        md += [f"No Search campaign has Search Partners materially worse than Google Search with {PARTNER_MIN_CLICKS}+ partner clicks.", ""]
+    if not sims and not args.csv:
+        md += ["Bid simulator: no TARGET_CPA or TARGET_ROAS simulations returned, so target changes carry no simulator preview.", ""]
     if notes:
         md += ["## Notes", ""] + [f"- {n}" for n in notes] + [""]
     md += ["## Caveats", "",
@@ -626,7 +809,8 @@ def main():
             if any(r["campaign"] == a.entity for r in change_rows):
                 a.files = ["bid_changes.csv"]
     summary = {"headline": headline, "campaigns": len(table), "brand_overspend": round(overspend, 2),
-               "target_changes": n_target, "items": len(approvals), "days": days}
+               "target_changes": n_target, "items": len(approvals), "days": days,
+               "search_partners": [a.entity for a in partner_items] if net is not None else "skipped: no network data"}
     d = gads.write_results(SKILL, cid, approvals, summary, "\n".join(md) + "\n", cur, extra)
     print(headline)
     print(f"-> {d}/gads-bid-audit.md  ·  queue: {d}/approvals.md")

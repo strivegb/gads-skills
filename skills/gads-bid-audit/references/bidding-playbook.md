@@ -52,6 +52,18 @@ Overspend estimate = (current brand CPC - reference CPC) x brand clicks. Referen
 
 Brand keywords inside a non-brand campaign make its CPA look better than it is, so its target is set on the wrong number. When brand is 15%+ of a campaign's spend, the skill reports the true non-brand CPA and holds any target change until brand is split out and added as a negative there.
 
+## Search Partners
+
+Search Partners shows Search ads on non-Google sites. Quality varies by account, so the bot compares it with Google Search inside each Search campaign (live: `segments.ad_network_type`; offline: a Campaigns report segmented by Network (with search partners)).
+
+It flags a campaign when partners have enough data (100+ clicks and 5%+ of the campaign's spend) and are materially worse: CPA at 1.5x Google Search or more, ROAS at 0.67x or less, or no conversions on spend worth two Google Search conversions. The saving is partners spend minus what its conversions would have cost on Google Search; the item also states the conversions given up, since Google Search will recover only part of them. The change is `campaign.network_settings.target_search_network = false`, made in Settings > Networks or Editor.
+
+Check before turning it off: lead quality from partners (offline conversion imports may tell a different story), and whether the campaign is volume-starved, where partners can be worth a higher CPA.
+
 ## Simulators
 
-Live runs read `campaign_simulation` (TARGET_CPA and TARGET_ROAS point lists) and quote the point closest to the proposed target. Simulators are Google's model, not a forecast you can promise. Quote them as "Google's simulator estimates".
+Live runs read `campaign_simulation` (type TARGET_CPA with `target_cpa_point_list.points`, type TARGET_ROAS with `target_roas_point_list.points`), plus `start_date` and `end_date`. For each proposed target the bot interpolates cost, conversions and value at the current target and at the proposed one, and puts both in the why text and the item evidence. Outside the simulated range it uses the nearest point and says so; if the simulator does not reach the proposed target at all, it adds nothing. The query is soft: an error or a campaign without simulations just means no preview. Simulators are Google's model and the numbers are directional. Quote them as "Google's simulator estimates".
+
+## Applying changes
+
+`apply_targets.py` uses the shared write gate: validate (prints a token), then `--execute --confirm <token>`. Moves above 20% need `--allow-large --reason "<why>"`. After writing it reads targets back and logs every change with the reason.

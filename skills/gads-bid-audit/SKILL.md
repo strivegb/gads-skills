@@ -25,7 +25,7 @@ Auth is Application Default Credentials with the adwords scope (developer tokens
 
 **Fill the profile before the first run.** `brand_terms` drives brand detection; without it brand campaigns are found by name only and brand mixing is missed. `target_cpa` / `target_roas` are the business goals the bot steps toward. Optional `brand_max_cpc` sets the reference brand CPC. Ask the user for these if empty. Do not guess.
 
-No API access? Offline mode takes UI exports: a Campaigns report for the window (columns: Campaign, Campaign type, Bid strategy type, Bid strategy, Target CPA, Target ROAS, Cost, Clicks, Impr., Conversions, Conv. value, Avg. CPC, Search impr. share, Search abs. top IS, Search lost IS (budget), Search lost IS (rank)), the same report for the last 7 days, the same report for a baseline period 60-90 days back, and a Keywords report (Keyword, Campaign, Cost, Clicks, Conversions).
+No API access? Offline mode takes UI exports: a Campaigns report for the window (columns: Campaign, Campaign type, Bid strategy type, Bid strategy, Target CPA, Target ROAS, Cost, Clicks, Impr., Conversions, Conv. value, Avg. CPC, Search impr. share, Search abs. top IS, Search lost IS (budget), Search lost IS (rank)), the same report for the last 7 days, the same report for a baseline period 60-90 days back, a Keywords report (Keyword, Campaign, Cost, Clicks, Conversions), and optionally a Campaigns report segmented by Network (with search partners) for the Search Partners check (skipped without it).
 
 ## Workflow
 
@@ -33,9 +33,10 @@ No API access? Offline mode takes UI exports: a Campaigns report for the window 
    ```bash
    "$PY" "$S/audit_bids.py" -c 1234567890 --days 30
    python3 "$S/audit_bids.py" --csv camp_30d.csv --recent camp_7d.csv --prior camp_prior.csv \
-       --keywords keywords.csv --brand "acme,acme payroll" --target-cpa 45 --currency USD    # offline
+       --keywords keywords.csv --network camp_by_network.csv \
+       --brand "acme,acme payroll" --target-cpa 45 --currency USD    # offline
    ```
-   Live mode pulls 30-day and 7-day campaign metrics, a baseline period, keyword-level brand split, portfolio targets, `change_event` for the last 14 days and bid simulators.
+   Live mode pulls 30-day and 7-day campaign metrics, a baseline period, keyword-level brand split, a Google Search vs Search Partners split, portfolio targets, `change_event` for the last 14 days and bid simulators.
 
 2. **Check context before presenting.** For each recommendation ask:
    - Brand overbid: is there a new competitor on the brand (Auction insights)? If yes, lower confidence and say so.
@@ -45,12 +46,12 @@ No API access? Offline mode takes UI exports: a Campaigns report for the window 
 
 3. **Present** `gads-bid-audit.md` in 6-10 lines: brand overbid amount, the target changes with old to new numbers, campaigns held for learning or recent changes, and notes on low-volume Smart Bidding. Point to `approvals.md`.
 
-4. **On approval**, apply target changes through the API (validate first) or in the UI:
+4. **On approval**, validate, then write with the token:
    ```bash
-   "$PY" "$S/apply_targets.py" -c 1234567890 --file <dir>/bid_changes.csv              # validate only
-   "$PY" "$S/apply_targets.py" -c 1234567890 --file <dir>/bid_changes.csv --execute    # write
+   "$PY" "$S/apply_targets.py" -c 1234567890 --file <dir>/bid_changes.csv                          # validate, prints token
+   "$PY" "$S/apply_targets.py" -c 1234567890 --file <dir>/bid_changes.csv --execute --confirm <token>
    ```
-   Remove rejected rows first. The script only touches campaign-level target CPA / target ROAS, skips portfolios and held rows, and refuses moves above 20%. Strategy switches (brand to Target impression share, manual to Smart Bidding) are done in the UI so the approver sees every setting. Never pass `--execute` without an explicit yes in this conversation.
+   Remove rejected rows before validating; editing the file afterwards means validating again. The script only touches campaign-level target CPA / target ROAS and skips portfolios and held rows. Moves above 20% are refused unless the user approved them and you add `--allow-large --reason "<their reason>"` (printed and logged). After writing it reads the targets back, prints any that did not land, and logs to `gads-out/<cid>/changes.log.jsonl`. Strategy switches and Search Partners changes are made in the UI (Settings > Networks) or Editor so the approver sees every setting. Never pass `--execute` without an explicit yes in this conversation.
 
 ## How the audit decides
 
@@ -64,6 +65,8 @@ No API access? Offline mode takes UI exports: a Campaigns report for the window 
 | Manual CPC with volume | >= 30 conv/month | Maximize conversions at actual CPA + 5% |
 | Low volume | < 30 conv/month on tCPA, < 50 on tROAS | note: pool, change goal, or drop the target |
 | Learning / recent change | LEARNING status or bid/budget change in 14 days | recommendation marked "Hold, then set", risk high |
+| Search Partners | Search campaign, partners >= 100 clicks and >= 5% of spend, partners CPA >= 1.5x Google Search CPA (or ROAS <= 0.67x, or no conversions on 2x+ Google Search CPA of spend) | turn off `target_search_network`; monthly saving and conversions given up |
+| Simulator preview (live) | `campaign_simulation` TARGET_CPA / TARGET_ROAS points exist | predicted cost and conversions at the current and proposed target, in the why text and evidence; skipped quietly when absent |
 
 ROAS rules mirror CPA. Thresholds and step size are practitioner guidance; the rationale and the brand method are in `references/bidding-playbook.md`.
 
@@ -78,7 +81,7 @@ ROAS rules mirror CPA. Thresholds and step size are practitioner guidance; the r
 
 ## Rules
 
-- Read-only by default. Writes only through `apply_targets.py --execute` after a yes.
+- Read-only by default. Writes only through `apply_targets.py --execute --confirm <token>` after a yes.
 - One lever per campaign per cycle. Never stack a target change on a fresh budget change.
 - Say "Google's simulator estimates" for simulator numbers; never present them as a promise.
 - Brand overbid is an estimate against a reference CPC. Name the reference.

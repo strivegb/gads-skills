@@ -9,7 +9,8 @@ Offline export: Campaigns report segmented by Day, covering at least the
 last 14 days and the whole current month to date. Columns: Day, Campaign,
 Budget, Budget name (optional, identifies shared budgets), Cost, Conversions,
 Conv. value, Search impr. share, Search lost IS (budget), Search lost IS (rank),
-Bid strategy type (optional).
+Bid strategy type (optional). Budget on each Day row drives the
+overdelivery check; without it that check is skipped.
 
 Outputs (gads-out/<cid>/<date>/):
   gads-budget-pacing.json / .md   summary + approval items
@@ -35,6 +36,10 @@ MAX_STEP = 0.20          # max change to a binding daily budget per adjustment (
 MARGINAL = 1.30          # assume marginal CPA is 30% worse than average CPA
 LIMITED_LB = 0.10        # search lost IS (budget) above this = budget-limited
 UTIL_LIMITED = 0.95      # non-search proxy: spending >= 95% of daily budget
+OVER_DAY = 1.20          # a day counts as overdelivery when spend > 1.2x that day's daily budget
+OVER_REPEAT = 3          # this many overdelivery days in the last 14 = repeated
+GOOGLE_DAY_MAX = 2.0     # Google may spend up to 2x the daily budget on one day
+GOOGLE_MONTH_X = 30.4    # and bills at most 30.4x the average daily budget per month
 VALUE_STRATS = {"MAXIMIZE_CONVERSION_VALUE", "TARGET_ROAS"}
 
 
@@ -84,8 +89,11 @@ def load_live(cid: str, today: dt.date):
         SELECT campaign.id, segments.date, metrics.cost_micros, metrics.conversions, metrics.conversions_value
         FROM campaign
         WHERE {gads.gaql_dates(w_start.isoformat(), yday.isoformat())} AND campaign.status = 'ENABLED'""")
+    # campaign_budget.amount_micros is today's budget, not the budget on each past day.
+    # The overdelivery check uses it for every day and says so (budget_source="current").
     days = [{"campaign_id": str(r["campaign.id"]), "date": r["segments.date"], "cost": micros(r.get("metrics.cost_micros")),
-             "conv": num(r.get("metrics.conversions")), "value": num(r.get("metrics.conversions_value"))} for r in daily]
+             "conv": num(r.get("metrics.conversions")), "value": num(r.get("metrics.conversions_value")),
+             "budget": meta.get(str(r["campaign.id"]), {}).get("daily", 0.0)} for r in daily]
     s14, e14 = (today - dt.timedelta(days=14)).isoformat(), yday.isoformat()
     isr = gads.query(cid, f"""
         SELECT campaign.id, metrics.search_impression_share, metrics.search_budget_lost_impression_share,
@@ -100,21 +108,22 @@ def load_live(cid: str, today: dt.date):
             m["lost_budget"] = num(r.get("metrics.search_budget_lost_impression_share"))
             m["lost_rank"] = num(r.get("metrics.search_rank_lost_impression_share"))
     sims = {}
-    try:
-        for r in gads.query(cid, """
-            SELECT campaign_simulation.campaign_id, campaign_simulation.budget_point_list.points
-            FROM campaign_simulation WHERE campaign_simulation.type = 'BUDGET'"""):
-            pts = r.get("campaign_simulation.budget_point_list.points") or []
-            sims[str(r["campaign_simulation.campaign_id"])] = sorted(
-                [(micros(p.get("budget_amount_micros")), micros(p.get("cost_micros")), num(p.get("biddable_conversions")),
-                  num(p.get("biddable_conversions_value"))) for p in pts], key=lambda x: x[0])
-    except SystemExit:
-        print("note: budget simulations unavailable; using the marginal-CPA assumption instead.", file=sys.stderr)
-    return list(meta.values()), days, sims
+    sim_rows = gads.query(cid, """
+        SELECT campaign_simulation.campaign_id, campaign_simulation.budget_point_list.points
+        FROM campaign_simulation WHERE campaign_simulation.type = 'BUDGET'""", soft=True)
+    if not sim_rows:
+        print("note: no budget simulations returned; using the marginal-CPA assumption instead.", file=sys.stderr)
+    for r in sim_rows:
+        pts = r.get("campaign_simulation.budget_point_list.points") or []
+        sims[str(r["campaign_simulation.campaign_id"])] = sorted(
+            [(micros(p.get("budget_amount_micros")), micros(p.get("cost_micros")), num(p.get("biddable_conversions")),
+              num(p.get("biddable_conversions_value"))) for p in pts], key=lambda x: x[0])
+    return list(meta.values()), days, sims, "current"
 
 
 def load_csv(paths: list[str]):
     meta, days = {}, []
+    seen_budget = False
     is_acc = defaultdict(lambda: {"w": 0.0, "is": 0.0, "lb": 0.0, "lr": 0.0})
     for p in paths:
         for r in gads.read_ui_csv(p):
@@ -139,9 +148,10 @@ def load_csv(paths: list[str]):
                 "daily": 0.0, "period": "DAILY", "shared": bool(bname), "total": 0.0})
             b = first_num(gads.pick(r, "budget"))
             if b:
+                seen_budget = True
                 m["daily"] = b  # last value wins = most recent budget
             cost = num(gads.pick(r, "cost"))
-            days.append({"campaign_id": camp, "date": d.isoformat(), "cost": cost,
+            days.append({"campaign_id": camp, "date": d.isoformat(), "cost": cost, "budget": b,
                          "conv": num(gads.pick(r, "conversions")), "value": num(gads.pick(r, "conv_value", "conversion_value"))})
             a = is_acc[camp]
             w = max(cost, 0.01)
@@ -162,7 +172,7 @@ def load_csv(paths: list[str]):
         m["shared"] = counts[m["budget_id"]] > 1
     for m in meta.values():
         m["campaign_id"] = m["campaign_id"] or m["campaign"]
-    return list(meta.values()), days, {}
+    return list(meta.values()), days, {}, ("per_day" if seen_budget else None)
 
 
 # ---------------------------------------------------------------- analysis
@@ -187,8 +197,13 @@ def build_entities(meta, days, sims, prof, today):
             "budget_id": m["budget_id"], "budget_rn": m["budget_rn"], "name": m["budget_name"] if m["shared"] else m["campaign"],
             "shared": m["shared"], "daily": m["daily"], "period": m["period"], "total": m["total"], "campaigns": [],
             "mtd": 0.0, "c7": 0.0, "c14": 0.0, "conv14": 0.0, "val14": 0.0, "is_w": 0.0, "is": 0.0, "lb": 0.0, "lr": 0.0,
-            "has_is": False, "tcpa": None, "troas": None, "value_mode": False, "cap": None, "sims": []})
+            "has_is": False, "tcpa": None, "troas": None, "value_mode": False, "cap": None, "sims": [],
+            "day_spend": defaultdict(float), "day_budget": {}})
         e["campaigns"].append(m["campaign"])
+        for r in rows:
+            e["day_spend"][r["date"]] += r["cost"]
+            if r.get("budget"):
+                e["day_budget"][r["date"]] = max(e["day_budget"].get(r["date"], 0.0), r["budget"])
         e["mtd"] += sum(r["cost"] for r in mtd)
         c7 = sum(r["cost"] for r in d7)
         c14 = sum(r["cost"] for r in d14)
@@ -327,6 +342,35 @@ def plan_shifts(ents, remaining):
     return transfers, recv, donors
 
 
+def overdelivery(ents, today, dim):
+    """Days where spend beat the daily budget, and campaigns heading past Google's monthly ceiling.
+
+    Returns one dict per budget worth flagging. Needs a daily budget per day (e["day_budget"]).
+    """
+    month_start = today.replace(day=1)
+    w14 = {(today - dt.timedelta(days=i)).isoformat() for i in range(1, 15)}
+    out = []
+    for e in ents.values():
+        if e["period"] != "DAILY" or e["daily"] <= 0 or not e["day_budget"]:
+            continue
+        over = sorted((d, sp, e["day_budget"][d]) for d, sp in e["day_spend"].items()
+                      if d in w14 and e["day_budget"].get(d) and sp > e["day_budget"][d] * OVER_DAY)
+        over_any = sum(1 for d, sp in e["day_spend"].items() if d in w14 and e["day_budget"].get(d) and sp > e["day_budget"][d])
+        # Google's ceiling: 30.4x the average daily budget across the month.
+        # Past days use the budget seen that day; the rest of the month uses today's budget.
+        budgets = []
+        for i in range(dim):
+            d = (month_start + dt.timedelta(days=i)).isoformat()
+            budgets.append(e["day_budget"].get(d, e["daily"]) if d < today.isoformat() else e["daily"])
+        ceiling = GOOGLE_MONTH_X * sum(budgets) / dim
+        peak = max(((sp / b, d, sp, b) for d, sp, b in over), default=None)
+        heading_over = e["projected"] > ceiling * 1.03  # 3% slack: a 31-day month at exactly budget is 31x
+        if len(over) >= OVER_REPEAT or heading_over:
+            out.append({"e": e, "over": over, "over_any": over_any, "peak": peak, "ceiling": ceiling,
+                        "heading_over": heading_over, "repeated": len(over) >= OVER_REPEAT})
+    return out
+
+
 def rnd(x: float) -> float:
     return round(x / 5) * 5 if x >= 50 else round(x)
 
@@ -334,7 +378,7 @@ def rnd(x: float) -> float:
 # ---------------------------------------------------------------- output
 
 
-def build_outputs(ents, transfers, recv, donors, prof, cid, cur, today, t_cpa, t_roas, remaining, dim):
+def build_outputs(ents, transfers, recv, donors, prof, cid, cur, today, t_cpa, t_roas, remaining, dim, budget_source=None):
     month = today.strftime("%b")
     approvals, changes = [], {}
 
@@ -466,6 +510,75 @@ def build_outputs(ents, transfers, recv, donors, prof, cid, cur, today, t_cpa, t
                 impact_monthly=abs(proj - acct_cap), impact_label="saves" if over else "", confidence="high", risk="low",
                 evidence={"mtd": round(mtd, 2), "run_rate": round(rr, 2), "projected": round(proj, 2), "cap": acct_cap}))
 
+    # 4) pause at cap: proposal only, never applied by a script
+    month_end = today.replace(day=dim)
+    funded = {r["budget_id"] for r in recv if r.get("unfunded", 0) < 1 and r["budget_id"] in {x["budget_id"] for _, x, _ in transfers}}
+    pause_items = []
+    for e in sorted(ents.values(), key=lambda e: e["dry_date"] or month_end):
+        if not (e["cap"] and e["dry_date"] and e["dry_date"] < month_end and e["projected"] > e["cap"] * 1.02):
+            continue
+        if e["budget_id"] in funded:
+            continue  # the shift gives it more plan, so it does not hit the cap
+        stretch = max(0.0, (e["cap"] - e["mtd"]) / remaining)
+        dd = e["dry_date"].strftime("%b %d")
+        who = f"every campaign on shared budget '{e['name']}' ({'; '.join(e['campaigns'])})" if e["shared"] else f"'{e['name']}'"
+        pause_items.append(Approval(
+            skill=SKILL, kind="pause_at_cap", entity=e["name"],
+            action=f"Pause {who} on {dd}, when it reaches its {money(e['cap'], cur)} {month} plan",
+            why=(f"At {money(e['rr'], cur)}/day it spends its plan by {dd} and would overshoot by {money(e['projected'] - e['cap'], cur)} by month end. "
+                 f"The alternative is a budget cut now: {money(e['daily'], cur)} -> {money(stretch, cur)}/day stretches the plan to {month_end.strftime('%b %d')}. "
+                 "This is a proposal only; nothing pauses automatically. Set a reminder or an automated rule once approved."),
+            impact_monthly=e["projected"] - e["cap"], impact_label="protects", confidence="medium", risk="medium",
+            severity="high" if (e["dry_date"] - today).days <= 7 else "medium",
+            evidence={"cap": e["cap"], "mtd": round(e["mtd"], 2), "run_rate": round(e["rr"], 2), "projected": round(e["projected"], 2),
+                      "pause_on": e["dry_date"].isoformat(), "alt_daily_budget": round(stretch, 2)},
+            change={"type": "pause_on_date", "budget": e["name"], "campaigns": e["campaigns"], "date": e["dry_date"].isoformat(),
+                    "alternative": {"new_daily": round(stretch, 2)}}))
+    if acct_cap and acct_dry and acct_dry < month_end and proj > acct_cap:
+        weakest = [e["name"] for e in sorted(ents.values(), key=lambda e: e.get("eff_score", 0.5)) if e["rr"] > 0][:3]
+        trim = (proj - acct_cap) / remaining
+        pause_items.append(Approval(
+            skill=SKILL, kind="pause_at_cap", entity="account",
+            action=f"Pause the account's weakest campaigns on {acct_dry.strftime('%b %d')}, when spend reaches the {money(acct_cap, cur)} {month} budget",
+            why=(f"Projected {money(proj, cur)} against a {money(acct_cap, cur)} monthly budget; the cap is reached on {acct_dry.strftime('%b %d')}. "
+                 f"Pause in this order: {', '.join(weakest)}. The alternative is trimming {money(trim, cur)}/day now. "
+                 "This is a proposal only; nothing pauses automatically."),
+            impact_monthly=proj - acct_cap, impact_label="protects", confidence="medium", risk="medium",
+            severity="high" if (acct_dry - today).days <= 7 else "medium",
+            evidence={"cap": acct_cap, "mtd": round(mtd, 2), "run_rate": round(rr, 2), "projected": round(proj, 2),
+                      "pause_on": acct_dry.isoformat(), "pause_order": weakest, "alt_trim_per_day": round(trim, 2)},
+            change={"type": "pause_on_date", "budget": "account", "campaigns": weakest, "date": acct_dry.isoformat(),
+                    "alternative": {"trim_per_day": round(trim, 2)}}))
+    approvals += pause_items
+
+    # 5) overdelivery
+    over_flags = overdelivery(ents, today, dim) if budget_source else []
+    for f in over_flags:
+        e = f["e"]
+        bits = []
+        if f["repeated"]:
+            pk = f["peak"]
+            bits.append(f"Spent more than {OVER_DAY:.1f}x its daily budget on {len(f['over'])} of the last 14 days "
+                        f"(peak {money(pk[2], cur)} on {pk[1]}, {pk[0]:.1f}x a {money(pk[3], cur)} budget).")
+        if f["heading_over"]:
+            bits.append(f"Projected {money(e['projected'], cur)} this month is above Google's ceiling of {money(f['ceiling'], cur)} "
+                        f"({GOOGLE_MONTH_X}x the average daily budget). Google credits spend above that, so delivery is likely to slow late in the month.")
+        bits.append(f"Google may spend up to {GOOGLE_DAY_MAX:.0f}x the daily budget on one day. If {money(e['daily'], cur)} is the most you want to pay on any day, "
+                    "lower the daily budget; if the monthly total is what matters, set a plan cap in the profile instead.")
+        if budget_source == "current":
+            bits.append("Budgets for past days are today's budget, so a budget change in the last 14 days can cause a false flag.")
+        approvals.append(Approval(
+            skill=SKILL, kind="overdelivery", entity=e["name"],
+            action=(f"Review overdelivery on '{e['name']}': above budget on {f['over_any']} of the last 14 days"
+                    + (f", heading past Google's {money(f['ceiling'], cur)} monthly ceiling" if f["heading_over"] else "")),
+            why=" ".join(bits), impact_label="", confidence="medium" if budget_source == "per_day" else "low", risk="low",
+            severity="medium" if f["heading_over"] else "low",
+            evidence={"daily_budget": round(e["daily"], 2), "days_over_budget_14d": f["over_any"],
+                      f"days_over_{OVER_DAY}x_14d": len(f["over"]),
+                      "over_days": [{"date": d, "spend": round(sp, 2), "budget": round(b, 2)} for d, sp, b in f["over"]][:10],
+                      "google_month_ceiling": round(f["ceiling"], 2), "projected": round(e["projected"], 2),
+                      "budget_source": budget_source}))
+
     # tables
     pace_rows = []
     for e in sorted(ents.values(), key=lambda e: -e["rr"]):
@@ -479,6 +592,9 @@ def build_outputs(ents, transfers, recv, donors, prof, cid, cur, today, t_cpa, t
             "cpa_14d": round(e["cpa"], 2) if e["cpa"] else "", "roas_14d": round(e["roas"], 2) if e["roas"] else "",
             "efficiency": e["eff"], "limited": e["limited"]})
     change_rows = [c for c in changes.values() if abs(c["new_daily"] - c["current_daily"]) >= 1]
+    for c in change_rows:
+        # apply_budgets.py refuses moves above 20% unless --allow-large --reason is given
+        c["large"] = "yes" if c["current_daily"] and abs(c["new_daily"] / c["current_daily"] - 1) > MAX_STEP + 1e-9 else "no"
 
     dry_list = [e for e in ents.values() if e["dry_date"] and e["dry_date"] < today.replace(day=dim)
                 and e["projected"] > e["cap"] * 1.02]
@@ -521,6 +637,21 @@ def build_outputs(ents, transfers, recv, donors, prof, cid, cur, today, t_cpa, t
                gads.md_table([[c["budget_name"], money(c["current_daily"], cur), money(c["new_daily"], cur),
                                f"{(c['new_daily'] / c['current_daily'] - 1):+.0%}" if c["current_daily"] else "-", c["why"]] for c in change_rows],
                              ["Budget", "Now", "New", "Change", "Why"]), ""]
+    if pause_items:
+        md += ["## Pause at cap (proposals)", "",
+               gads.md_table([[a.entity, a.evidence["pause_on"], money(a.evidence["cap"], cur), money(a.evidence["projected"], cur)] for a in pause_items],
+                             ["Budget", "Pause on", "Plan", "Projected"]), ""]
+    md += ["## Overdelivery", ""]
+    if not budget_source:
+        md += ["Overdelivery check skipped: the export has no Budget column on its Day rows. Add Budget to the report to enable it.", ""]
+    elif over_flags:
+        md += [gads.md_table([[f["e"]["name"], money(f["e"]["daily"], cur), f["over_any"], len(f["over"]),
+                               f"{f['peak'][0]:.1f}x" if f["peak"] else "-", money(f["ceiling"], cur), money(f["e"]["projected"], cur)] for f in over_flags],
+                             ["Budget", "Daily", "Days over (14d)", f"Days > {OVER_DAY:.1f}x", "Peak", "Google ceiling", "Projected"]), ""]
+    else:
+        md += ["No budget overdelivered repeatedly or is heading past Google's monthly ceiling.", ""]
+    if budget_source == "current":
+        md += ["Live mode compares each day's spend with today's budget (the API returns the current amount only).", ""]
     md += ["## Caveats", "",
            "- Run rate excludes today (partial). Projection assumes the next days look like the last 7-14.",
            "- Google can spend up to 2x the daily budget on a single day and caps the month at 30.4x the average daily budget.",
@@ -531,7 +662,9 @@ def build_outputs(ents, transfers, recv, donors, prof, cid, cur, today, t_cpa, t
     summary = {"headline": headline, "mtd": round(mtd, 2), "run_rate": round(rr, 2), "projected": round(proj, 2),
                "account_cap": acct_cap, "account_runs_dry": acct_dry.isoformat() if acct_dry else None,
                "runs_dry": [{"budget": e["name"], "date": e["dry_date"].isoformat()} for e in dry_list],
-               "shift_per_day": round(shift_total, 2), "changes": len(change_rows), "days_left": remaining}
+               "shift_per_day": round(shift_total, 2), "changes": len(change_rows), "days_left": remaining,
+               "overdelivery": [f["e"]["name"] for f in over_flags] if budget_source else "skipped: no per-day budget",
+               "pause_at_cap": [{"budget": a.entity, "date": a.evidence["pause_on"]} for a in pause_items]}
     extra = {"pacing.csv": gads.to_csv(pace_rows), "budget_changes.csv": gads.to_csv(change_rows)}
     return approvals, summary, "\n".join(md) + "\n", extra
 
@@ -545,7 +678,7 @@ def main():
         cid = gads.clean_cid(args.customer) or "offline"
         cur = args.currency
         today = dt.date.fromisoformat(args.today) if args.today else dt.date.today()
-        meta, days, sims = load_csv(args.csv)
+        meta, days, sims, budget_source = load_csv(args.csv)
     else:
         if not args.customer:
             gads.die("--customer is required in live mode (or pass --csv).")
@@ -553,7 +686,7 @@ def main():
         info = gads.account_info(cid)
         cur = info["currency"]
         today = dt.date.fromisoformat(args.today) if args.today else acct_today(info["time_zone"])
-        meta, days, sims = load_live(cid, today)
+        meta, days, sims, budget_source = load_live(cid, today)
     if not meta:
         gads.die("No enabled campaigns with budgets found.")
     if today.day == 1:
@@ -561,7 +694,9 @@ def main():
     prof = gads.load_profile(cid)
     ents, t_cpa, t_roas, remaining, dim = build_entities(meta, days, sims, prof, today)
     transfers, recv, donors = plan_shifts(ents, remaining)
-    approvals, summary, md, extra = build_outputs(ents, transfers, recv, donors, prof, cid, cur, today, t_cpa, t_roas, remaining, dim)
+    if not budget_source:
+        print("note: no Budget column on Day rows; overdelivery check skipped.", file=sys.stderr)
+    approvals, summary, md, extra = build_outputs(ents, transfers, recv, donors, prof, cid, cur, today, t_cpa, t_roas, remaining, dim, budget_source)
     d = gads.write_results(SKILL, cid, approvals, summary, md, cur, extra)
     print(summary["headline"])
     print(f"-> {d}/{SKILL}.md  ·  queue: {d}/approvals.md")

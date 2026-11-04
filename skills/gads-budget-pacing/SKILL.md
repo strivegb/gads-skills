@@ -28,7 +28,7 @@ Auth is Application Default Credentials with the adwords scope (developer tokens
 - `campaign_budgets`: `{"Campaign or shared budget name": monthly_plan}`. Without these, "runs dry" has no meaning and the bot falls back to daily reallocation by lost impression share.
 - `target_cpa` / `target_roas`: decide which campaigns deserve more money. Campaign-level Smart Bidding targets override them.
 
-Offline mode: Campaigns report segmented by Day covering the last 14 days and the whole month to date, with Budget, Budget name, Cost, Conversions, Conv. value, Search impr. share, Search lost IS (budget), Search lost IS (rank).
+Offline mode: Campaigns report segmented by Day covering the last 14 days and the whole month to date, with Budget, Budget name, Cost, Conversions, Conv. value, Search impr. share, Search lost IS (budget), Search lost IS (rank). Budget on each Day row drives the overdelivery check; without it that check is skipped and the summary says so.
 
 ## Workflow
 
@@ -44,14 +44,14 @@ Offline mode: Campaigns report segmented by Day covering the last 14 days and th
    - Shared budgets appear once, with all their campaigns. A shift touches every campaign on that budget.
    - Efficiency `unknown` means too few conversions in 14 days to judge. Those budgets never receive money.
 
-3. **Present** `gads-budget-pacing.md` in 6-10 lines: MTD, run rate, projected vs plan, which budgets run dry and when, the proposed $/day shift and where it comes from, expected conversions. Point to `approvals.md`.
+3. **Present** `gads-budget-pacing.md` in 6-10 lines: MTD, run rate, projected vs plan, which budgets run dry and when, the proposed $/day shift and where it comes from, expected conversions, any pause-at-cap dates and overdelivery flags. Point to `approvals.md`.
 
-4. **On approval**, validate then write:
+4. **On approval**, validate, then write with the token:
    ```bash
-   "$PY" "$S/apply_budgets.py" -c 1234567890 --file <dir>/budget_changes.csv            # validate only
-   "$PY" "$S/apply_budgets.py" -c 1234567890 --file <dir>/budget_changes.csv --execute  # write
+   "$PY" "$S/apply_budgets.py" -c 1234567890 --file <dir>/budget_changes.csv                          # validate, prints token
+   "$PY" "$S/apply_budgets.py" -c 1234567890 --file <dir>/budget_changes.csv --execute --confirm <token>
    ```
-   Remove rejected rows first. The script re-reads live budgets and skips any that changed since the analysis. Never pass `--execute` without an explicit yes in this conversation. Plan-only changes (a campaign keeps its daily budget but gets more of the month) need the user to update their plan sheet and the profile `campaign_budgets`; say so.
+   Remove rejected rows before validating; editing the file afterwards means validating again. Rows with `large=yes` move more than 20% and are refused unless the user approved them and you add `--allow-large --reason "<their reason>"` (printed and logged). The script skips budgets that changed since the analysis, reads every budget back after writing, prints any that did not land, and logs to `gads-out/<cid>/changes.log.jsonl`. Never pass `--execute` without an explicit yes in this conversation. Plan-only changes (a campaign keeps its daily budget but gets more of the month) need the user to update their plan sheet and the profile `campaign_budgets`; say so. Pause-at-cap items are never applied by a script: the user pauses on the date, or sets an automated rule.
 
 5. **Re-run in 2-3 days.** Pacing drifts; one check per month is not pacing.
 
@@ -68,6 +68,8 @@ Offline mode: Campaigns report segmented by Day covering the last 14 days and th
 | Donors, in order | 1. plan slack (will underspend its plan, not limited) 2. unused headroom (spending < 80% of daily) 3. poor efficiency (gives 20%) |
 | Step size | budget-limited campaigns move at most 20% per change |
 | Impact | budget simulation when the API returns one; otherwise marginal CPA = 1.3x average CPA |
+| Pause at cap | a campaign or the account will pass its plan (`campaign_budgets` / `monthly_budget`) before month end, and no shift funds it: propose a pause on that date, with a budget cut that stretches the plan as the alternative |
+| Overdelivery | 3+ of the last 14 days above 1.2x that day's daily budget, or projected month above 30.4x the average daily budget. Live mode uses today's budget for past days (`campaign_budget.amount_micros` is current only) |
 
 Also flagged: campaigns that will overshoot their plan with weak efficiency (cut to land on plan), campaigns that will underspend a committed plan (raise if budget-limited; otherwise the limit is bids or demand, not budget), and the account against `monthly_budget`. Details and the reasoning behind each threshold: `references/budget-pacing-playbook.md`.
 
@@ -77,12 +79,12 @@ Also flagged: campaigns that will overshoot their plan with weak efficiency (cut
 |---|---|
 | `gads-budget-pacing.md` | human summary with pacing table, shift, changes |
 | `pacing.csv` | one row per budget: daily, run rate, utilization, MTD, projected, plan, runs_dry, lost IS, CPA/ROAS, efficiency |
-| `budget_changes.csv` | budget_id, budget_resource_name, budget_name, shared, campaigns, current_daily, new_daily, why (input to `apply_budgets.py`) |
+| `budget_changes.csv` | budget_id, budget_resource_name, budget_name, shared, campaigns, current_daily, new_daily, why, large (input to `apply_budgets.py`) |
 | `approvals.md` | merged queue across all gads-* skills |
 
 ## Rules
 
-- Read-only by default. Writes only through `apply_budgets.py --execute` after a yes.
+- Read-only by default. Writes only through `apply_budgets.py --execute --confirm <token>` after a yes.
 - Never move money into a campaign without conversion evidence, and never into one that is limited by rank rather than budget (more budget will not buy impressions it is losing on bids or quality).
 - Be honest about what a shift does. Moving unused headroom into a limited campaign raises actual spend even though total daily budget is flat; the summary says so.
 - Google can spend up to 2x a daily budget on one day and caps a month at 30.4x the average daily budget. Explain this when a single-day spike alarms the user.

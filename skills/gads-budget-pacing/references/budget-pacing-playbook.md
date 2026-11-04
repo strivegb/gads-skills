@@ -9,6 +9,21 @@ Reference for `gads-budget-pacing`. Load when explaining a recommendation or han
 - Mid-month budget changes: see Google's "About spending limits" article for how the monthly limit adjusts; do not promise a specific clawback.
 - Campaign total budgets (`period` not DAILY, `total_amount_micros`) spend toward a fixed total over the campaign dates. The pacer reports them but does not shift money into or out of them.
 
+## Overdelivery
+
+A day above the daily budget is normal; Google averages spend over the month. The bot flags a budget when it is a pattern worth a decision:
+
+- **Repeated:** 3 or more of the last 14 days above 1.2x that day's daily budget. The 1.2x floor ignores routine small overages.
+- **Heading past the ceiling:** projected month spend above 30.4x the average daily budget (with 3% slack so a 31-day month at exactly budget is not flagged). Google credits spend above the ceiling, so delivery tends to slow late in the month.
+
+The fix depends on what the owner cares about. If the daily number is the most they want to pay on any day, lower it. If the monthly total matters, add a plan cap to the profile and let pacing manage it.
+
+Data: offline exports carry Budget per Day row, so each day is compared with the budget that applied. Live mode reads `campaign_budget.amount_micros`, which is today's value; a budget change in the last 14 days can cause a false flag, and confidence is set to low.
+
+## Pause at cap
+
+When a campaign with a plan cap, or the account against `monthly_budget`, is projected to pass its cap before month end, the bot proposes a pause on the projected date. The same item gives the alternative: a daily budget cut now that stretches the remaining plan to month end. For the account, it lists the campaigns to pause first (weakest CPA/ROAS first). Campaigns that a budget shift already funds are skipped. This is a proposal only; no script pauses anything. Once approved, the user pauses on the date or sets an automated rule.
+
 ## Plan caps vs Google's ceiling
 
 Google only knows daily budgets. "Runs dry" is a business concept: the campaign has a monthly allocation (in the profile `campaign_budgets`) and at the current rate it uses it up before month end. At that point the owner either pauses it or overspends the plan. The bot's job is to see that 1-2 weeks early and move plan money from campaigns that will not use theirs.
@@ -25,6 +40,10 @@ Without plan caps, the bot cannot say "runs dry". It switches to daily reallocat
 | low | low | saturated | more budget buys little; expand targeting |
 
 Impression share metrics exist only for Search and Shopping. For PMax and Demand Gen the bot uses utilization (run rate / daily budget >= 95%) as the budget-limited proxy, which is weaker evidence.
+
+## Applying changes
+
+`apply_budgets.py` uses the shared write gate: validate (prints a token), then `--execute --confirm <token>`. Any move above 20% is refused unless `--allow-large --reason "<why>"` is given; the pacer marks those rows `large=yes`. Donor cuts of unused headroom often exceed 20%; they carry no delivery risk, but they still need the explicit reason so the log shows who approved what. After writing, the script reads the budgets back and logs every change.
 
 ## Why a 20% step
 

@@ -1,0 +1,10 @@
+Campaign report
+October 4, 2026 - November 2, 2026
+Campaign,Network (with search partners),Cost,Clicks,Conversions,Conv. value
+Brand - Acme,Google search,"1,850.00",385,117,0
+Brand - Acme,Search partners,22.00,5,1,0
+Search - Payroll Software,Google search,"7,200.00","1,750",118,0
+Search - Payroll Software,Search partners,"1,640.00",400,12,0
+Search - HR Software,Google search,"3,300.00",900,55,0
+Search - HR Software,Search partners,360.00,120,5,0
+Total: Account,,"14,372.00","3,560",308,0
