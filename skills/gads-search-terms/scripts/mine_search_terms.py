@@ -3,7 +3,8 @@
 mine_search_terms.py - read every search term, flag junk, build the negative list.
 
 Live:     $PY mine_search_terms.py -c 123-456-7890 --days 30
-Offline:  python3 mine_search_terms.py --csv search_terms.csv [--keywords keywords.csv] --currency USD
+Offline:  python3 mine_search_terms.py --csv search_terms.csv [--keywords keywords.csv] \
+              [--history terms_365d.csv] [--daily terms_by_day.csv] --currency USD
 Re-run with Claude's judgments on ambiguous terms:
           ... --labels gads-out/<cid>/<date>/llm_labels.csv
 
@@ -13,11 +14,20 @@ Outputs (gads-out/<cid>/<date>/):
   harvest.csv                    converting terms to add as keywords
   ambiguous.csv                  terms for Claude to judge (label + reason)
   ngrams.csv                     1-3 gram waste table
+
+Safety and watch checks:
+  over-blocking   every proposed negative is tested against converting queries
+                  (live: 365 days; offline: --history). Hits are held back.
+  examples        negatives.csv carries blocks_example and spares_example.
+  trending        last 7 days vs prior daily rate, zero conversions
+                  (live: segments.date; offline: --daily with a Day column).
+  PMax categories live only: campaign_search_term_insight, current vs prior.
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import datetime as dt
 import math
 import re
 import sys
@@ -202,6 +212,125 @@ def load_live(cid: str, start: str, end: str, pmax: bool) -> tuple[list[dict], l
     return terms, positives, negs
 
 
+def load_history_live(cid: str, end: str, days: int, pmax: bool) -> tuple[list[dict], str]:
+    """Converting search terms over a long window, for the over-blocking check."""
+    start = (dt.date.fromisoformat(end) - dt.timedelta(days=days - 1)).isoformat()
+    w = gads.gaql_dates(start, end)
+    rows = gads.query(cid, f"""
+        SELECT campaign.id, campaign.name, search_term_view.search_term,
+               metrics.conversions, metrics.conversions_value
+        FROM search_term_view
+        WHERE {w} AND metrics.conversions > 0""", soft=True)
+    hist = [{"campaign_id": str(r.get("campaign.id", "")), "campaign": r.get("campaign.name", ""),
+             "term": r.get("search_term_view.search_term", ""), "conv": num(r.get("metrics.conversions"))}
+            for r in rows]
+    if pmax:
+        for r in gads.query(cid, f"""
+            SELECT campaign.id, campaign.name, campaign_search_term_view.search_term, metrics.conversions
+            FROM campaign_search_term_view
+            WHERE {w} AND campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+              AND metrics.conversions > 0""", soft=True):
+            hist.append({"campaign_id": str(r.get("campaign.id", "")), "campaign": r.get("campaign.name", ""),
+                         "term": r.get("campaign_search_term_view.search_term", ""),
+                         "conv": num(r.get("metrics.conversions"))})
+    label = f"{days} days ({start} to {end})" if rows else f"not run: the {days}-day history query returned nothing or failed"
+    return hist, label
+
+
+def _title_window(path: str) -> str:
+    """'October 4, 2025 - November 2, 2026' from the title rows of a UI export, if present."""
+    try:
+        head = Path(path).read_text(encoding="utf-8-sig", errors="ignore").splitlines()[:3]
+    except OSError:
+        return ""
+    for ln in head:
+        if re.search(r"(19|20)\d\d", ln) and " - " in ln:
+            return ln.strip().strip('"')
+    return ""
+
+
+def load_history_csv(path: str) -> tuple[list[dict], str]:
+    hist, days = [], set()
+    for r in gads.read_ui_csv(path):
+        term = gads.pick(r, "search_term", "search_terms", "query")
+        conv = num(gads.pick(r, "conversions", "conv"))
+        d = gads.pick(r, "day", "date")
+        if d:
+            days.add(str(d))
+        if term and conv > 0:
+            hist.append({"campaign_id": gads.pick(r, "campaign_id"), "campaign": gads.pick(r, "campaign"),
+                         "term": term, "conv": conv})
+    label = _title_window(path) or (f"{min(days)} to {max(days)}" if days else "dates not stated in the export")
+    return hist, f"{label} (from {Path(path).name})"
+
+
+def load_daily_live(cid: str, end: str, days: int) -> list[dict]:
+    start = (dt.date.fromisoformat(end) - dt.timedelta(days=days - 1)).isoformat()
+    rows = gads.query(cid, f"""
+        SELECT segments.date, campaign.name, search_term_view.search_term,
+               metrics.clicks, metrics.cost_micros, metrics.conversions
+        FROM search_term_view
+        WHERE {gads.gaql_dates(start, end)} AND metrics.cost_micros > 0""", soft=True)
+    return [{"date": r.get("segments.date", ""), "campaign": r.get("campaign.name", ""),
+             "term": r.get("search_term_view.search_term", ""), "clicks": num(r.get("metrics.clicks")),
+             "cost": micros(r.get("metrics.cost_micros")), "conv": num(r.get("metrics.conversions"))} for r in rows]
+
+
+def load_daily_csv(path: str) -> list[dict]:
+    out = []
+    for r in gads.read_ui_csv(path):
+        term, d = gads.pick(r, "search_term", "search_terms", "query"), gads.pick(r, "day", "date")
+        if not term or not d:
+            continue
+        try:
+            d = dt.date.fromisoformat(str(d)[:10]).isoformat()
+        except ValueError:
+            try:
+                d = dt.datetime.strptime(str(d), "%b %d, %Y").date().isoformat()
+            except ValueError:
+                continue
+        out.append({"date": d, "campaign": gads.pick(r, "campaign"), "term": term,
+                    "clicks": num(gads.pick(r, "clicks")), "cost": num(gads.pick(r, "cost")),
+                    "conv": num(gads.pick(r, "conversions", "conv"))})
+    return out
+
+
+def load_pmax_categories(cid: str, start: str, end: str) -> list[dict]:
+    """PMax search category labels, current vs prior window of equal length.
+
+    campaign_search_term_insight must be filtered to one campaign_id per query,
+    so we loop over enabled PMax campaigns. The date range goes in WHERE only.
+    Every query is soft: any error skips that campaign.
+    """
+    s, e = dt.date.fromisoformat(start), dt.date.fromisoformat(end)
+    n = (e - s).days + 1
+    ps, pe = (s - dt.timedelta(days=n)).isoformat(), (s - dt.timedelta(days=1)).isoformat()
+    camps = gads.query(cid, """
+        SELECT campaign.id, campaign.name FROM campaign
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX' AND campaign.status = 'ENABLED'""", soft=True)
+    out = []
+    for c in camps[:25]:
+        cid_, cname = str(c.get("campaign.id", "")), c.get("campaign.name", "")
+        if not cid_.isdigit():
+            continue
+        agg: dict[str, dict] = {}
+        for period, (a, b) in (("cur", (start, end)), ("prior", (ps, pe))):
+            for r in gads.query(cid, f"""
+                SELECT campaign_search_term_insight.category_label,
+                       metrics.impressions, metrics.clicks, metrics.conversions
+                FROM campaign_search_term_insight
+                WHERE campaign_search_term_insight.campaign_id = {cid_}
+                  AND segments.date BETWEEN '{a}' AND '{b}'""", soft=True):
+                lab = r.get("campaign_search_term_insight.category_label") or "(uncategorised)"
+                x = agg.setdefault(lab, {"campaign": cname, "category": lab, "cur_impr": 0.0, "cur_clicks": 0.0,
+                                         "cur_conv": 0.0, "prior_impr": 0.0, "prior_clicks": 0.0, "prior_conv": 0.0})
+                x[f"{period}_impr"] += num(r.get("metrics.impressions"))
+                x[f"{period}_clicks"] += num(r.get("metrics.clicks"))
+                x[f"{period}_conv"] += num(r.get("metrics.conversions"))
+        out.extend(agg.values())
+    return out
+
+
 def load_csv(paths: list[str], kw_csv: str | None) -> tuple[list[dict], list[dict], list[dict]]:
     terms = []
     for p in paths:
@@ -277,6 +406,67 @@ STOP = {"a", "an", "the", "for", "of", "in", "on", "to", "and", "or", "with", "n
 def protected(text: str, protect_toks: list[list[str]]) -> bool:
     tt = toks(text)
     return any(contains_phrase(tt, p) or contains_phrase(p, tt) for p in protect_toks if p)
+
+
+def trending(daily: list[dict], protect_toks: list[list[str]], target_cpa: float, args) -> dict:
+    """Terms and 1-2 grams whose last-7-day daily cost is well above their prior daily rate, with 0 conv."""
+    if not daily:
+        return {"note": "skipped: no date-segmented data (live query failed or no --daily export)", "items": []}
+    dates = sorted({d["date"] for d in daily})
+    last = dt.date.fromisoformat(dates[-1])
+    first = dt.date.fromisoformat(dates[0])
+    rdays = args.trend_days
+    cut = last - dt.timedelta(days=rdays - 1)
+    prior_days = (cut - first).days
+    if prior_days < rdays:
+        return {"note": f"skipped: need at least {rdays} prior days, export has {max(prior_days, 0)}", "items": []}
+    agg: dict[tuple, dict] = {}
+    for d in daily:
+        recent = dt.date.fromisoformat(d["date"]) >= cut
+        tt = toks(d["term"])
+        keys = {("term", " ".join(tt))}
+        for n in (1, 2):
+            for i in range(len(tt) - n + 1):
+                g = tt[i:i + n]
+                if not all(w in STOP for w in g):
+                    keys.add(("gram", " ".join(g)))
+        for k in keys:
+            x = agg.setdefault(k, {"kind": k[0], "text": k[1], "recent_cost": 0.0, "recent_conv": 0.0,
+                                   "recent_clicks": 0.0, "prior_cost": 0.0, "prior_conv": 0.0, "terms": set()})
+            p = "recent" if recent else "prior"
+            x[f"{p}_cost"] += d["cost"]
+            x[f"{p}_conv"] += d["conv"]
+            if recent:
+                x["recent_clicks"] += d["clicks"]
+            x["terms"].add(" ".join(tt))
+    min_cost = args.trend_min_cost if args.trend_min_cost is not None else 0.25 * target_cpa
+    items = []
+    for x in agg.values():
+        if x["recent_conv"] > 0 or x["recent_cost"] < min_cost:
+            continue
+        if x["kind"] == "gram" and (len(x["terms"]) < 2 or ("term", x["text"]) in agg):
+            continue
+        if protected(x["text"], protect_toks):
+            continue
+        r_rate, p_rate = x["recent_cost"] / rdays, x["prior_cost"] / prior_days
+        if p_rate and r_rate < args.trend_ratio * p_rate:
+            continue
+        x["ratio"] = round(r_rate / p_rate, 1) if p_rate else None
+        x["terms"] = len(x["terms"])
+        items.append(x)
+    items.sort(key=lambda x: -x["recent_cost"])
+    return {"note": f"last {rdays} days ({cut} to {last}) vs prior {prior_days} days", "items": items[:20],
+            "recent_days": rdays, "min_cost": min_cost}
+
+
+def pmax_growth(cats: list[dict]) -> list[dict]:
+    """PMax categories that grew (impressions up 50%+ and 100+ impressions) with no conversions."""
+    out = []
+    for c in cats:
+        if c["cur_conv"] > 0 or c["cur_impr"] < 100 or c["cur_impr"] < 1.5 * c["prior_impr"]:
+            continue
+        out.append(c)
+    return sorted(out, key=lambda c: -(c["cur_impr"] - c["prior_impr"]))[:20]
 
 
 def analyse(rows, positives, negs, prof, args, currency):
@@ -359,6 +549,25 @@ def analyse(rows, positives, negs, prof, args, currency):
         flagged.append({**r, "reason": reason, "confidence": conf, "neg_text": norm(r["term"]), "neg_match": mtype,
                         "level": "campaign", "p_zero": round(pz, 3)})
 
+    # Over-blocking check: converting queries from the long history plus this window.
+    history = list(getattr(args, "history_rows", []) or [])
+    conv_queries = [{"term": r["term"], "campaign": r["campaign"], "conv": r["conv"]} for r in converting] + history
+    held: list[dict] = []
+
+    def overblocks(text: str, mtype: str, campaign: str = "") -> list[str]:
+        hit = []
+        for q in conv_queries:
+            if campaign and q.get("campaign") and q["campaign"] != campaign:
+                continue
+            if neg_blocks(text, mtype, q["term"]) and norm(q["term"]) not in hit:
+                hit.append(norm(q["term"]))
+        return hit
+
+    def hold(n: dict, level: str, queries: list[str]) -> None:
+        if not any(h["negative"] == syntax(n["neg_text"], n["neg_match"]) and h["level"] == level for h in held):
+            held.append({"negative": syntax(n["neg_text"], n["neg_match"]), "level": level,
+                         "campaign": n.get("campaign", ""), "cost": n.get("cost", 0), "blocks": queries})
+
     # n-gram theme negatives: one phrase negative instead of many exacts.
     # Greedy set cover by spend, so two grams that hit the same terms
     # ("tool" and "variant" in "payroll tool variant 12") yield one negative.
@@ -373,6 +582,10 @@ def analyse(rows, positives, negs, prof, args, currency):
         if all(w in STOP for w in gt) or len(g["ngram"]) < 3:
             continue
         if protected(g["ngram"], protect) or p_zero(g["clicks"], cvr) > 0.10:
+            continue
+        ob = overblocks(g["ngram"], "PHRASE")
+        if ob:
+            hold({"neg_text": g["ngram"], "neg_match": "PHRASE", "cost": g["cost"]}, "shared list", ob)
             continue
         hits = [i for i, tt in enumerate(row_toks) if contains_phrase(tt, gt)]
         new = [i for i in hits if i not in covered_idx]
@@ -396,23 +609,57 @@ def analyse(rows, positives, negs, prof, args, currency):
             lex[k]["terms"] += 1
     for (word, mtype), v in lex.items():
         if v["terms"] >= 2 and not protected(word, protect) and not any(t["neg_text"] == word for t in theme_negs):
-            theme_negs.append({"neg_text": word, "neg_match": mtype, "level": "shared", "cost": v["cost"],
-                               "clicks": 0, "terms": v["terms"], "reason": f"junk theme word, {v['terms']} terms"})
+            cand = {"neg_text": word, "neg_match": mtype, "level": "shared", "cost": v["cost"],
+                    "clicks": 0, "terms": v["terms"], "reason": f"junk theme word, {v['terms']} terms"}
+            ob = overblocks(word, mtype)
+            if ob:
+                hold(cand, "shared list", ob)
+                continue
+            theme_negs.append(cand)
 
-    # drop exact negatives already covered by a theme negative
-    covered = lambda f_: any(neg_blocks(t["neg_text"], t["neg_match"], f_["term"]) for t in theme_negs)  # noqa: E731
-    exact_negs = [f_ for f_ in flagged if not covered(f_)]
-
-    # conflicts: proposed negative would block a live keyword
+    # conflicts: proposed negative would block a live keyword. Theme negatives
+    # are checked first so that terms a dropped theme covered fall back to exacts.
     conflicts = []
-    for n in exact_negs + theme_negs:
-        for p in positives:
-            if neg_blocks(n["neg_text"], n["neg_match"], p["text"]):
-                conflicts.append((n["neg_text"], p["text"]))
-                n["conflict"] = p["text"]
-                break
-    exact_negs = [n for n in exact_negs if not n.get("conflict")]
-    theme_negs = [n for n in theme_negs if not n.get("conflict")]
+
+    def drop_conflicts(negs_):
+        for n in negs_:
+            for p in positives:
+                if neg_blocks(n["neg_text"], n["neg_match"], p["text"]):
+                    conflicts.append((n["neg_text"], p["text"]))
+                    n["conflict"] = p["text"]
+                    break
+        return [n for n in negs_ if not n.get("conflict")]
+
+    theme_negs = drop_conflicts(theme_negs)
+    covered = lambda f_: any(neg_blocks(t["neg_text"], t["neg_match"], f_["term"]) for t in theme_negs)  # noqa: E731
+    exact_negs = drop_conflicts([f_ for f_ in flagged if not covered(f_)])
+    kept = []
+    for n in exact_negs:
+        ob = overblocks(n["neg_text"], n["neg_match"], n["campaign"])
+        if ob:
+            hold(n, "campaign", ob)
+        else:
+            kept.append(n)
+    exact_negs = kept
+
+    # Boundary examples: the costliest query a negative blocks, and the closest
+    # converting query or keyword that shares a word with it and stays open.
+    spare_pool = [(norm(q["term"]), q.get("conv", 0)) for q in conv_queries] + [(norm(p["text"]), 0) for p in positives]
+    for n in theme_negs + exact_negs:
+        same = n.get("level") == "campaign"
+        blk = [r for r in rows if (not same or r["campaign"] == n["campaign"]) and neg_blocks(n["neg_text"], n["neg_match"], r["term"])]
+        n["blocks_example"] = norm(max(blk, key=lambda r: r["cost"])["term"]) if blk else ""
+        nt = set(toks(n["neg_text"])) - STOP
+        best, best_key = "", None
+        for q, conv in spare_pool:
+            qt = set(q.split())
+            shared_w = len(nt & qt)
+            if not shared_w or q == norm(n["neg_text"]) or neg_blocks(n["neg_text"], n["neg_match"], q):
+                continue
+            key = (-shared_w, len(qt - nt), -conv, q)
+            if best_key is None or key < best_key:
+                best, best_key = q, key
+        n["spares_example"] = best
 
     def blocked(r):
         if any(neg_blocks(t["neg_text"], t["neg_match"], r["term"]) for t in theme_negs):
@@ -424,10 +671,14 @@ def analyse(rows, positives, negs, prof, args, currency):
     return {
         "rows": rows, "flagged": flagged, "exact_negs": exact_negs, "theme_negs": theme_negs,
         "ambiguous": sorted(ambiguous, key=lambda r: -r["cost"]), "harvest": sorted(harvest, key=lambda r: -r["conv"]),
-        "competitor": competitor, "grams": grams, "conflicts": conflicts,
+        "competitor": competitor, "grams": grams, "conflicts": conflicts, "held": held,
+        "trending": trending(getattr(args, "daily_rows", []) or [], brand + never, target_cpa, args),
+        "pmax_cats": pmax_growth(getattr(args, "pmax_cats", []) or []),
         "stats": {"terms": len(rows), "cost": tot_cost, "clicks": tot_clicks, "conv": tot_conv, "cvr": cvr,
                   "acct_cpa": acct_cpa, "target_cpa": target_cpa, "waste": waste, "waste_monthly": waste * scale,
-                  "flagged": flagged_n, "days": days},
+                  "flagged": flagged_n, "days": days,
+                  "history_window": getattr(args, "history_label", ""), "history_converting_queries": len(conv_queries),
+                  "held_back_overblock": len(held)},
     }
 
 
@@ -441,12 +692,15 @@ def build_outputs(res, cid, currency, args):
     for n in res["theme_negs"]:
         neg_rows.append({"level": "shared list", "campaign": "", "campaign_id": "", "keyword": syntax(n["neg_text"], n["neg_match"]),
                          "text": n["neg_text"], "match_type": n["neg_match"], "reason": n["reason"],
-                         "cost": round(n["cost"], 2), "clicks": int(n["clicks"]), "conv": 0, "terms_covered": n["terms"]})
+                         "cost": round(n["cost"], 2), "clicks": int(n["clicks"]), "conv": 0, "terms_covered": n["terms"],
+                         "blocks_example": n.get("blocks_example", ""), "spares_example": n.get("spares_example", "")})
     for n in sorted(res["exact_negs"], key=lambda x: -x["cost"]):
         neg_rows.append({"level": "campaign", "campaign": n["campaign"], "campaign_id": n.get("campaign_id", ""),
                          "keyword": syntax(n["neg_text"], n["neg_match"]), "text": n["neg_text"], "match_type": n["neg_match"],
-                         "reason": n["reason"], "cost": round(n["cost"], 2), "clicks": int(n["clicks"]), "conv": 0, "terms_covered": 1})
-    cols = ["level", "campaign", "campaign_id", "keyword", "text", "match_type", "reason", "cost", "clicks", "conv", "terms_covered"]
+                         "reason": n["reason"], "cost": round(n["cost"], 2), "clicks": int(n["clicks"]), "conv": 0, "terms_covered": 1,
+                         "blocks_example": n.get("blocks_example", ""), "spares_example": n.get("spares_example", "")})
+    cols = ["level", "campaign", "campaign_id", "keyword", "text", "match_type", "reason", "cost", "clicks", "conv", "terms_covered",
+            "blocks_example", "spares_example"]
     harvest_rows = [{"campaign": h["campaign"], "ad_group": h["ad_group"], "keyword": f"[{norm(h['term'])}]",
                      "conv": round(h["conv"], 2), "cost": round(h["cost"], 2), "cpa": round(h["cpa"], 2),
                      "triggered_by": h.get("keywords", "")} for h in res["harvest"]]
@@ -496,9 +750,23 @@ def build_outputs(res, cid, currency, args):
         approvals.append(Approval(
             skill=SKILL, kind="competitor_review", entity="competitor terms",
             action=f"Decide on {len(res['competitor'])} non-converting competitor terms ({money(cc, cur)})",
-            why="Competitor traffic is a strategy call, not junk. Either move it to a dedicated competitor campaign with its own CPA target, or negate it.",
+            why="Competitor traffic needs a strategy call. Either move it to a dedicated competitor campaign with its own CPA target, or negate it.",
             impact_monthly=cc * 30 / s["days"], impact_label="saves", confidence="low", risk="medium",
             evidence={"terms": len(res["competitor"]), "cost": round(cc, 2)}))
+
+    tr = res["trending"]
+    tr_terms = [x for x in tr["items"] if x["kind"] == "term"]
+    tr_cost = sum(x["recent_cost"] for x in tr_terms)
+    if tr_terms and tr_cost >= s["target_cpa"]:
+        rd = tr["recent_days"]
+        approvals.append(Approval(
+            skill=SKILL, kind="trending_terms", entity="trending search terms",
+            action=f"Review {len(tr_terms)} search term{'s' if len(tr_terms) != 1 else ''} that started spending fast with no conversions",
+            why=f"They spent {money(tr_cost, cur)} in the last {rd} days, at least {args.trend_ratio:g}x their earlier daily rate. "
+                f"Top: {tr_terms[0]['text']!r} ({money(tr_terms[0]['recent_cost'], cur)}). Negate the clear junk, watch the rest.",
+            impact_monthly=tr_cost * 30 / rd, impact_label="saves", confidence="low", risk="low",
+            evidence={"terms": len(tr_terms), "recent_cost": round(tr_cost, 2), "window": tr["note"]},
+            change={"watch": [x["text"] for x in tr_terms]}))
 
     headline = (f"Read {s['terms']:,} search terms, flagged {s['flagged']:,} as junk "
                 f"({money(s['waste'], cur)} in {s['days']}d, ~{money(s['waste_monthly'], cur)}/mo), "
@@ -508,7 +776,9 @@ def build_outputs(res, cid, currency, args):
           f"- Spend in search terms report: {money(s['cost'], cur)} · {int(s['clicks']):,} clicks · {s['conv']:.1f} conv · CVR {s['cvr']:.2%}",
           f"- CPA used for thresholds: {money(s['target_cpa'], cur)} ({'profile/flag target' if (args.target_cpa) else 'account actual or profile'})",
           f"- Converting terms to harvest: {len(res['harvest'])} · ambiguous for review: {len(res['ambiguous'])} · competitor terms: {len(res['competitor'])}",
-          f"- Negatives dropped because they would block a live keyword: {len(res['conflicts'])}", "",
+          f"- Negatives dropped because they would block a live keyword: {len(res['conflicts'])}",
+          f"- Over-blocking check against converting queries, window: {s['history_window']} "
+          f"({s['history_converting_queries']} converting queries). Held back: {len(res['held'])}", "",
           "## Theme negatives (shared list)", "",
           gads.md_table([[syntax(n['neg_text'], n['neg_match']), money(n['cost'], cur), n['terms'], n['reason']] for n in res['theme_negs'][:30]],
                         ["Negative", "Cost", "Terms", "Why"]) if res['theme_negs'] else "_none_", "",
@@ -519,15 +789,35 @@ def build_outputs(res, cid, currency, args):
         md += ["## Harvest as keywords", "", gads.md_table([[h['term'], h['campaign'], f"{h['conv']:.1f}", money(h['cpa'], cur)] for h in res['harvest'][:15]], ["Term", "Campaign", "Conv", "CPA"]), ""]
     if res["conflicts"]:
         md += ["## Held back (would block a live keyword)", ""] + [f"- `{a}` would block keyword `{b}`" for a, b in res["conflicts"][:20]] + [""]
+    if res["held"]:
+        md += ["## Held back (would block a query that converted)", "",
+               gads.md_table([[h["negative"], h["level"] + (f" ({h['campaign']})" if h.get("campaign") else ""),
+                               ", ".join(h["blocks"][:3]) + (f" +{len(h['blocks']) - 3} more" if len(h["blocks"]) > 3 else "")]
+                              for h in res["held"][:25]], ["Negative", "Level", "Converting queries it would block"]), ""]
+    md += ["## Trending terms watch list", "", f"_{tr['note']}_", ""]
+    if tr["items"]:
+        md += [gads.md_table([[x["text"], x["kind"], money(x["recent_cost"], cur), int(x["recent_clicks"]),
+                               f"{x['ratio']}x" if x["ratio"] else "new", x["terms"]] for x in tr["items"]],
+                             ["Term or gram", "Kind", f"Cost last {tr['recent_days']}d", "Clicks", "Daily rate vs prior", "Terms"]), ""]
+    elif tr["note"].startswith("last"):
+        md += ["_no term is rising fast without conversions_", ""]
+    if res["pmax_cats"]:
+        md += ["## PMax search categories growing with no conversions", "",
+               gads.md_table([[c["campaign"], c["category"], int(c["prior_impr"]), int(c["cur_impr"]), int(c["cur_clicks"])]
+                              for c in res["pmax_cats"]], ["Campaign", "Category", "Impr. prior", "Impr. now", "Clicks now"]),
+               "", "Directional only. Category labels group many queries; check the terms before adding PMax negatives.", ""]
     md += ["## Caveats", "",
-           "- Google hides low-volume search terms; the report covers part of spend, not all of it.",
+           "- Google hides low-volume search terms; the report covers only part of spend.",
            "- Savings assume blocked spend is not simply re-spent on similar junk. Re-check in 14 days.",
            "- Negatives do not match close variants. Plurals and synonyms need their own entry (misspellings are covered)."]
 
     extra = {"negatives.csv": gads.to_csv(neg_rows, cols), "harvest.csv": gads.to_csv(harvest_rows),
              "ambiguous.csv": gads.to_csv(amb_rows), "ngrams.csv": gads.to_csv(gram_rows)}
     summary = {"headline": headline, **{k: (round(v, 2) if isinstance(v, float) else v) for k, v in s.items()},
-               "negatives": len(neg_rows), "harvest": len(res["harvest"]), "ambiguous": len(amb_rows)}
+               "negatives": len(neg_rows), "harvest": len(res["harvest"]), "ambiguous": len(amb_rows),
+               "trending": [x["text"] for x in tr["items"]], "trending_note": tr["note"],
+               "held_back": [{"negative": h["negative"], "blocks": h["blocks"]} for h in res["held"]],
+               "pmax_growing_categories": len(res["pmax_cats"])}
     return approvals, summary, "\n".join(md) + "\n", extra
 
 
@@ -542,22 +832,37 @@ def main():
     ap.add_argument("--max-ngrams", type=int, default=40)
     ap.add_argument("--max-ambiguous", type=int, default=150)
     ap.add_argument("--pmax", action="store_true", help="Also pull Performance Max search terms (campaign level).")
+    ap.add_argument("--history", help="Offline: longer search terms export (ideally 365 days) for the over-blocking check.")
+    ap.add_argument("--history-days", type=int, default=365, help="Live: history window for the over-blocking check (default 365).")
+    ap.add_argument("--daily", help="Offline: search terms export segmented by Day, for trending terms.")
+    ap.add_argument("--daily-days", type=int, default=35, help="Live: days of date-segmented data for trending (default 35).")
+    ap.add_argument("--trend-days", type=int, default=7, help="Recent window for trending terms (default 7).")
+    ap.add_argument("--trend-ratio", type=float, default=2.0, help="Recent daily cost must be this multiple of the prior rate (default 2).")
+    ap.add_argument("--trend-min-cost", type=float, help="Minimum recent cost for a trending term (default 0.25x CPA).")
     args = ap.parse_args()
 
     start, end = gads.resolve_window(args)
-    import datetime as dt
     args.window_days = (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days + 1
 
     if args.csv:
         cid = gads.clean_cid(args.customer) or "offline"
         terms, positives, negs = load_csv(args.csv, args.keywords)
         currency = args.currency
+        if args.history:
+            args.history_rows, args.history_label = load_history_csv(args.history)
+        else:
+            args.history_rows, args.history_label = [], "current window only (pass --history for a longer check)"
+        args.daily_rows = load_daily_csv(args.daily) if args.daily else []
+        args.pmax_cats = []
     else:
         if not args.customer:
             gads.die("--customer is required in live mode (or pass --csv).")
         cid = gads.clean_cid(args.customer)
         currency = gads.account_info(cid)["currency"]
         terms, positives, negs = load_live(cid, start, end, args.pmax)
+        args.history_rows, args.history_label = load_history_live(cid, end, args.history_days, args.pmax)
+        args.daily_rows = load_daily_live(cid, end, args.daily_days)
+        args.pmax_cats = load_pmax_categories(cid, start, end)
     if not terms:
         gads.die("No search terms in the window. Check the date range or the export.")
     prof = gads.load_profile(cid)

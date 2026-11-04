@@ -1,0 +1,9 @@
+Search terms report
+November 3, 2025 - November 2, 2026
+Search term,Match type,Added/Excluded,Campaign,Ad group,Keyword,Impr.,Clicks,Cost,Conversions,Conv. value
+payroll software,Phrase match,None,Search - Payroll,Payroll Core,"""payroll software""",5400,450,1550.00,60,24000
+free payroll software trial,Phrase match,None,Search - Payroll,Payroll Core,"""payroll software""",300,25,90.00,3,1200
+payroll tool for accountants,Broad match,None,Search - Payroll,Payroll Core,payroll software,240,20,70.00,2,800
+payroll software pdf,Phrase match,None,Search - Payroll,Payroll Core,"""payroll software""",120,10,38.00,1,400
+salary calculator,Phrase match,None,Search - Payroll,Payroll Core,"""payroll software""",400,33,170.00,0,0
+Total: Account,,,,,,,,,,
