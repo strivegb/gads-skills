@@ -17,7 +17,8 @@ policy, duplicates within the draft and against kept assets, keyword coverage,
 final counts. Exit code 1 if any hard error, so nothing broken gets shipped.
 
 Output rsa_drafts.csv uses Google Ads Editor columns for responsive search ads.
-Importing it creates a NEW RSA per row. Pause the old ad after import so
+Importing it creates a NEW RSA per row with Status Paused, so nothing serves
+until a human enables it. Pause the old ad when the new one goes live so
 history stays readable.
 """
 from __future__ import annotations
@@ -132,7 +133,7 @@ def main():
         elif top and not any(kw_in(h["text"], top[0]) for h in heads):
             warnings.append(f"[{label}] top keyword '{top[0]}' not in any headline")
 
-        row = {"Campaign": camp, "Ad group": adg, "Ad type": "Responsive search ad", "Status": "Enabled"}
+        row = {"Campaign": camp, "Ad group": adg, "Ad type": "Responsive search ad", "Status": "Paused"}  # never serve unreviewed copy
         for i in range(MAX_HEADLINES):
             h = heads[i] if i < len(heads) else {"text": "", "pin": ""}
             row[f"Headline {i + 1}"] = h["text"]

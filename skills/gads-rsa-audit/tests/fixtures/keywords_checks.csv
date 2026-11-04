@@ -1,0 +1,10 @@
+Search keyword report
+October 4, 2026 - November 2, 2026
+Keyword,Match type,Campaign,Ad group,Ad group status,Impr.
+"""payroll software""",Phrase match,Search - Payroll,Payroll Core,Enabled,30000
+"""small business payroll""",Phrase match,Search - Payroll,Payroll Small Biz,Enabled,6000
+"""hr software""",Phrase match,Search - HR,HR Software,Enabled,5000
+"""hr payroll""",Phrase match,Search - HR,HR Payroll,Enabled,3500
+"""employee onboarding software""",Phrase match,Search - HR,HR Onboarding,Enabled,0
+"""old keyword""",Phrase match,Search - HR,Old Group,Paused,0
+"""acme payroll""",Exact match,Search - Brand,Brand Core,Enabled,0

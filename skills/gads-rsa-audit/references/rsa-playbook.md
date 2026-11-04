@@ -40,7 +40,7 @@ Values: Best, Good, Low, Learning, Pending, Unrated. Labels compare an asset to 
 
 - Every pinned headline reduces the combinations Google can test.
 - Pin only for legal disclaimers, regulated claims or a brand requirement.
-- If a slot must be pinned, pin 2-3 alternatives to it, not one.
+- If a slot must be pinned, pin 2-3 alternatives to it so Google can still rotate.
 - 3+ pinned headlines is flagged; all headlines pinned turns the RSA into a static ad.
 
 ## Near-duplicates
@@ -66,13 +66,51 @@ At least one, ideally two, headlines should contain the ad group's top keyword (
 
 Not checked automatically (judge yourself): trademark use of competitor names, superlatives that need third-party proof ("No. 1", "best"), health, finance and other restricted claims, prices that differ from the landing page.
 
-## Ads per ad group
+## Ads per ad group (coverage)
 
+- 0 enabled RSAs, or only disapproved ones, in an enabled ad group of an enabled Search campaign: the keywords have no RSA to show. High severity; write one. Dynamic Search Ad groups are excluded.
 - 1 RSA: fine for low-volume ad groups, but no message test is running. Suggest a second RSA with a different lead angle.
 - 2-3 RSAs: normal. More splits impressions and slows learning.
+- Live mode reads the ad group list from the API. Offline it needs the ad groups report, or falls back to the ad groups in the keywords report. Without either, only single-RSA ad groups are reported.
+
+## Policy
+
+- Disapproved (`policy_summary.approval_status` DISAPPROVED, or "Disapproved" in the export's Status column): the ad does not serve. Critical. The policy topic names the problem (trademarks, destination not working, editorial). Fix the asset or the page, then resubmit.
+- Approved (limited): serves in fewer auctions, countries or devices. High. Rewrite when the restriction is avoidable (a trademark you do not hold, a restricted claim); leave it when the limit is structural (alcohol, healthcare).
+- "Destination not working" disapprovals usually match a broken page in `rsa_links.csv`. Fix the page first.
+
+## Landing pages
+
+`check_links.py` fetches each unique final URL of an enabled ad once, the way Google's Link Checker script does.
+
+| Problem | Meaning | Severity |
+|---|---|---|
+| broken | HTTP 4xx or 5xx, or more than 10 redirects | critical with spend, high without |
+| unreachable | timeout, DNS failure or refused connection (retried once) | critical with spend, high without |
+| soft_404 | HTTP 200, but the page says "page not found", "no longer available", "out of stock" and similar | critical with spend, high without |
+| off_domain | a redirect ends on a different domain (www and subdomains count as the same site) | high: risks a destination mismatch disapproval |
+| homepage | a deep URL redirects to the homepage, which usually means the page was removed | high |
+
+- ValueTrack placeholders are filled before fetching: `{keyword}` becomes `test`, `{matchtype}` `e`, `{device}` `c`, `{ifnotmobile:x}` and `{ifsearch:x}` become `x`, and any other placeholder (including `{_custom}`) is removed.
+- Soft 404 phrases are plain substring matches on the first 512 KB of the page. Add a site's own wording with `--fail-text`. A product page that mentions "out of stock" for one variant will match; check the page before pausing anything.
+- Some sites block unknown bots or rate-limit. A 401, 403 or 429 is reported as "blocked": a medium, low-confidence item asking a person to open the page, never a critical broken-page item.
+- The User-Agent is `gads-skills-link-checker/1.0`. Never add an email or account name.
+
+## Ad testing
+
+Within each ad group with 2+ enabled, non-disapproved RSAs, `audit_rsas.py` compares the leader against every other ad on two rates:
+
+- CTR = clicks / impressions
+- conversions per impression = conversions / impressions (CTR x conversion rate, the number that matters)
+
+Method: two-proportion z-test, two-sided. z = (p1 - p2) / sqrt(p (1 - p) (1/n1 + 1/n2)), with p the pooled rate. Defaults: 1,000+ impressions per ad (`--min-test-impr`), 95% confidence (`--confidence`).
+
+- A winner is reported only when the leader beats the other ad at the confidence level. Anything else reads "not enough data", including ad groups where fewer than two ads have the minimum impressions.
+- A pause proposal needs a significant conversions-per-impression result and 30+ conversions on the winner (`--min-winner-conv`). A CTR win alone never triggers a pause: a curiosity headline can lift CTR and lower conversion rate.
+- With 3 ads, the leader is tested twice, so the chance of a false winner rises a little. Treat a borderline p near 0.05 as "not enough data".
+- After pausing a loser, write a new challenger so the ad group keeps two RSAs.
 
 ## Measuring a rewrite
 
-- Wait about 2 weeks and a few thousand impressions per ad.
-- Compare conversions per impression (CTR x CVR), not CTR alone. A curiosity headline can lift CTR and lower conversion rate.
-- Keep the old ad paused, not removed, so the comparison stays available.
+- Wait about 2 weeks and a few thousand impressions per ad, then read `rsa_tests.csv`.
+- Keep the old ad paused rather than removed so the comparison stays available.
